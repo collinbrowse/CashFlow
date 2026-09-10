@@ -444,10 +444,13 @@ public actor SwiftDataAccountRepository: AccountRepository {
             throw CashFlowError.persistence(message: "Account name can't be empty.")
         }
         let id = UUID().uuidString
-        let externalID = "csv:\(id)"
+        let identityKey = ProviderIdentityEncoding.csvAccountKey(localAccountID: id)
         let entity = AccountEntity(
             id: id,
-            externalID: externalID,
+            identityKey: identityKey,
+            source: .csvImport,
+            linkNamespace: id,
+            providerAccountID: identityKey,
             name: trimmed,
             institutionName: institutionName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                 ? "CSV Import"
@@ -456,7 +459,8 @@ public actor SwiftDataAccountRepository: AccountRepository {
             balance: 0,
             balanceDate: .now,
             userEditedName: true,
-            createdByImportBatchID: createdByImportBatchID?.rawValue
+            createdByImportBatchID: createdByImportBatchID?.rawValue,
+            providerState: .current
         )
         context.insert(entity)
         try context.save()

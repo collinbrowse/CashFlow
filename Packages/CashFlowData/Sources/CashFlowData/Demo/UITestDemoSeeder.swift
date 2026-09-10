@@ -15,7 +15,10 @@ public enum UITestDemoSeeder {
             now: now
         )
         try SyncMergeEngine.merge(
-            payload: RemoteSyncPayload(accounts: remoteAccounts),
+            payload: RemoteSyncPayload(
+                source: ProviderLinkIdentity(source: .demo, linkNamespace: "demo"),
+                accounts: remoteAccounts
+            ),
             into: context
         )
 
@@ -30,6 +33,9 @@ public enum UITestDemoSeeder {
                 needsReauth: false,
                 lastSuccessfulSyncAt: now,
                 isDemo: true,
+                source: .demo,
+                linkNamespace: DemoBankLinkingService.linkNamespace,
+                inventoryCompleteness: .complete,
                 earliestFetchedDate: earliest,
                 historyComplete: true,
                 historyBackfillComplete: true

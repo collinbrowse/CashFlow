@@ -4,9 +4,11 @@ import os
 
 public enum ModelContainerFactory {
     private static let logger = Logger(subsystem: "com.expensetracking", category: "persistence")
+    /// Shared marker: once set, V3 store is authoritative and Keychain credentials are preserved.
+    public static let storeEpochKey = "cashflow.storeEpoch.v3"
+    public static let storeEpochValue = "3"
 
-    /// Creates the app ModelContainer. Disk failures wipe stores and retry; last resort is in-memory.
-    /// Prefer this over crashing the process when SwiftData cannot migrate.
+    /// Creates the app ModelContainer. Disk failures fall back without silently wiping after V3.
     public static func make(
         inMemory: Bool = false,
         appGroupID: String? = nil
@@ -19,45 +21,34 @@ public enum ModelContainerFactory {
 
     /// Non-throwing entry point for app launch.
     public static func makeResilient(appGroupID: String? = nil) -> ModelContainer {
-        let schema = Schema(versionedSchema: CashFlowSchemaV2.self)
+        let schema = Schema(versionedSchema: CashFlowSchemaV3.self)
+        performOneTimeV3LedgerResetIfNeeded(appGroupID: appGroupID)
 
-        // SwiftData traps (not throws) when `groupContainer` is set but the App Group
-        // entitlement is missing — common under `CODE_SIGNING_ALLOWED=NO` / XCTest.
-        // Only attempt the shared store when the container URL is actually resolvable.
         if let appGroupID, isAppGroupAvailable(appGroupID) {
             if let container = attemptLoad(schema: schema, configuration: appGroupConfiguration(schema: schema, appGroupID: appGroupID)) {
+                markV3StoreReady(appGroupID: appGroupID)
                 return container
             }
-            logger.error("App Group store failed to load; wiping and retrying")
-            destroyPersistentStores(appGroupID: appGroupID)
-            if let container = attemptLoad(schema: schema, configuration: appGroupConfiguration(schema: schema, appGroupID: appGroupID)) {
-                return container
-            }
-            logger.error("App Group store still unavailable after wipe; falling back to local Application Support")
+            logger.error("App Group store failed to load; preserving files and falling back to local Application Support")
         } else if appGroupID != nil {
             logger.error("App Group container unavailable; using local Application Support")
         }
 
         if let container = attemptLoad(schema: schema, configuration: localConfiguration(schema: schema)) {
-            return container
-        }
-        logger.error("Local store failed to load; wiping and retrying")
-        destroyPersistentStores(appGroupID: nil)
-        if let container = attemptLoad(schema: schema, configuration: localConfiguration(schema: schema)) {
+            markV3StoreReady(appGroupID: appGroupID)
             return container
         }
 
-        logger.fault("Persistent stores unusable; launching with in-memory SwiftData")
+        logger.fault("Persistent stores unusable; launching with in-memory SwiftData (ledger preserved on disk)")
         do {
             return try makeInMemoryContainer()
         } catch {
-            // In-memory failure is effectively impossible; keep a typed escape hatch for tests.
             preconditionFailure("In-memory ModelContainer failed: \(error)")
         }
     }
 
     private static func makeInMemoryContainer() throws -> ModelContainer {
-        let schema = Schema(versionedSchema: CashFlowSchemaV2.self)
+        let schema = Schema(versionedSchema: CashFlowSchemaV3.self)
         let configuration = ModelConfiguration(schema: schema, isStoredInMemoryOnly: true)
         return try ModelContainer(
             for: schema,
@@ -94,22 +85,51 @@ public enum ModelContainerFactory {
         ModelConfiguration(schema: schema, isStoredInMemoryOnly: false)
     }
 
-    /// Opens only the shared App Group store. Returns `nil` when the group is missing or
-    /// the store cannot load — never falls back to this process's Application Support
-    /// (that would show empty $0 instead of the app's data).
+    /// Opens only the shared App Group store. Returns `nil` when the group is missing,
+    /// the V3 epoch marker is absent, or the store cannot load.
     public static func makeSharedStoreIfAvailable(appGroupID: String) -> ModelContainer? {
         guard isAppGroupAvailable(appGroupID) else { return nil }
-        let schema = Schema(versionedSchema: CashFlowSchemaV2.self)
+        guard isV3StoreReady(appGroupID: appGroupID) else {
+            logger.info("Widget waiting for app to complete V3 store reset")
+            return nil
+        }
+        let schema = Schema(versionedSchema: CashFlowSchemaV3.self)
         return attemptLoad(
             schema: schema,
             configuration: appGroupConfiguration(schema: schema, appGroupID: appGroupID)
         )
     }
 
-    /// `false` when the process lacks the App Group entitlement (unsigned CI / many test hosts).
     public static func isAppGroupAvailable(_ appGroupID: String) -> Bool {
         guard !appGroupID.isEmpty else { return false }
         return FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroupID) != nil
+    }
+
+    /// One-time wipe of the local ledger for the V3 identity redesign. Keychain is untouched.
+    public static func performOneTimeV3LedgerResetIfNeeded(appGroupID: String?) {
+        guard !isV3StoreReady(appGroupID: appGroupID) else { return }
+        logger.notice("Performing one-time V3 ledger reset (Keychain credentials preserved)")
+        destroyPersistentStores(appGroupID: appGroupID)
+    }
+
+    public static func isV3StoreReady(appGroupID: String?) -> Bool {
+        defaults(for: appGroupID).string(forKey: storeEpochKey) == storeEpochValue
+    }
+
+    public static func markV3StoreReady(appGroupID: String?) {
+        defaults(for: appGroupID).set(storeEpochValue, forKey: storeEpochKey)
+    }
+
+    /// Test helper: clears the V3 epoch marker so the next launch resets the ledger.
+    public static func clearV3StoreEpochMarker(appGroupID: String?) {
+        defaults(for: appGroupID).removeObject(forKey: storeEpochKey)
+    }
+
+    private static func defaults(for appGroupID: String?) -> UserDefaults {
+        if let appGroupID, let defaults = UserDefaults(suiteName: appGroupID) {
+            return defaults
+        }
+        return .standard
     }
 
     /// Removes SwiftData/SQLite store files from App Group + local Application Support.
@@ -125,7 +145,6 @@ public enum ModelContainerFactory {
         if let appGroupID,
            let root = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroupID)
         {
-            // SwiftData with groupContainer writes under Library/Application Support.
             directories.append(root.appending(path: "Library/Application Support", directoryHint: .isDirectory))
             directories.append(root)
         }
@@ -170,7 +189,6 @@ public enum ModelContainerFactory {
 
     private static func removeSQLiteBundle(at url: URL, fileManager fm: FileManager) {
         let path = url.path
-        // SwiftData uses `default.store`; SQLite sidecars are typically `default.store-wal`.
         for candidate in [path, path + "-shm", path + "-wal", path + ".shm", path + ".wal"] {
             if fm.fileExists(atPath: candidate) {
                 try? fm.removeItem(at: URL(fileURLWithPath: candidate))
