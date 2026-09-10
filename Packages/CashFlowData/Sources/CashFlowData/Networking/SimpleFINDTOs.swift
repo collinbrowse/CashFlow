@@ -35,13 +35,41 @@ struct SimpleFINConnectionDTO: Decodable, Sendable {
     let orgURL: String?
     let sfinURL: String?
 
+    init(
+        connID: String,
+        name: String,
+        orgID: String? = nil,
+        orgName: String? = nil,
+        orgURL: String? = nil,
+        sfinURL: String? = nil
+    ) {
+        self.connID = connID
+        self.name = name
+        self.orgID = orgID
+        self.orgName = orgName
+        self.orgURL = orgURL
+        self.sfinURL = sfinURL
+    }
+
     enum CodingKeys: String, CodingKey {
         case name
         case connID = "conn_id"
         case orgID = "org_id"
         case orgName = "org_name"
         case orgURL = "org_url"
-        case sfinURL = "sfin-url"
+        case sfinURLHyphen = "sfin-url"
+        case sfinURLUnderscore = "sfin_url"
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        connID = try container.decode(String.self, forKey: .connID)
+        name = try container.decode(String.self, forKey: .name)
+        orgID = try container.decodeIfPresent(String.self, forKey: .orgID)
+        orgName = try container.decodeIfPresent(String.self, forKey: .orgName)
+        orgURL = try container.decodeIfPresent(String.self, forKey: .orgURL)
+        sfinURL = try container.decodeIfPresent(String.self, forKey: .sfinURLUnderscore)
+            ?? container.decodeIfPresent(String.self, forKey: .sfinURLHyphen)
     }
 }
 

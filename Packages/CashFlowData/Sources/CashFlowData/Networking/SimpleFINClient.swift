@@ -89,12 +89,14 @@ public struct SimpleFINClient: Sendable {
 
     public func fetchAccounts(
         accessURL: String,
+        link: ProviderLinkIdentity,
         startDate: Date?,
         endDate: Date?,
         onWindowProgress: (@Sendable (_ completed: Int, _ total: Int) -> Void)? = nil
     ) async throws -> RemoteSyncPayload {
         try await fetchAccountsWindowed(
             accessURL: accessURL,
+            link: link,
             startDate: startDate,
             endDate: endDate,
             maxWindows: nil,
@@ -105,6 +107,7 @@ public struct SimpleFINClient: Sendable {
 
     public func fetchAccountsWindowed(
         accessURL: String,
+        link: ProviderLinkIdentity,
         startDate: Date?,
         endDate: Date?,
         maxWindows: Int?,
@@ -136,14 +139,18 @@ public struct SimpleFINClient: Sendable {
         for window in windows {
             let payload = try await fetchAccountsWindow(
                 accessURL: accessURL,
+                link: link,
                 startDate: window.lowerBound,
                 endDate: window.upperBound
             )
             payloads.append(payload)
             completed += 1
             onWindowProgress?(completed, windows.count)
-            let txCount = payload.accounts.reduce(0) { $0 + $1.transactions.count }
-            if txCount == 0 {
+            let authoritativeEmpty = payload.inventoryCompleteness == .complete
+                && payload.accounts.allSatisfy {
+                    $0.transactionCompleteness == .authoritative && $0.transactions.isEmpty
+                }
+            if authoritativeEmpty {
                 consecutiveEmpty += 1
                 if let stopAfterConsecutiveEmpty,
                    stopAfterConsecutiveEmpty > 0,
@@ -151,7 +158,7 @@ public struct SimpleFINClient: Sendable {
                 {
                     break
                 }
-            } else {
+            } else if payload.accounts.contains(where: { !$0.transactions.isEmpty }) {
                 consecutiveEmpty = 0
             }
         }
@@ -164,7 +171,7 @@ public struct SimpleFINClient: Sendable {
             : (windows.prefix(completed).map(\.upperBound).max() ?? resolvedEnd)
 
         return WindowedFetchResult(
-            payload: Self.mergePayloads(payloads),
+            payload: Self.mergePayloads(payloads, source: link),
             windowsCompleted: completed,
             consecutiveEmptyTrailing: consecutiveEmpty,
             fetchedStart: fetchedStart,
@@ -174,6 +181,7 @@ public struct SimpleFINClient: Sendable {
 
     private func fetchAccountsWindow(
         accessURL: String,
+        link: ProviderLinkIdentity,
         startDate: Date,
         endDate: Date
     ) async throws -> RemoteSyncPayload {
@@ -198,13 +206,27 @@ public struct SimpleFINClient: Sendable {
         try throwForStatus(response.statusCode, action: "Syncing accounts", body: data)
 
         let dto = try JSONDecoder().decode(SimpleFINAccountSetDTO.self, from: data)
-        let messages = dto.displayMessages.map(sanitize)
-        let connectionsByID = Dictionary(
-            uniqueKeysWithValues: (dto.connections ?? []).map { ($0.connID, $0) }
+        let structuredIssues = Self.mapIssues(dto.errlist ?? [])
+        let connections = (dto.connections ?? []).map(Self.mapConnection)
+        var connectionsByID: [String: RemoteProviderConnection] = [:]
+        connectionsByID.reserveCapacity(connections.count)
+        for connection in connections {
+            connectionsByID[connection.id] = connection
+        }
+        let mapped = dto.accounts.map {
+            mapAccount($0, link: link, connectionsByID: connectionsByID, issues: structuredIssues)
+        }
+        let accounts = Self.applyingSyncIssues(to: mapped, issues: structuredIssues)
+        let inventory = Self.inventoryCompleteness(issues: structuredIssues, accountCount: accounts.count)
+        let messages = structuredIssues.map(\.message).map(sanitize)
+        return RemoteSyncPayload(
+            source: link,
+            accounts: accounts,
+            connections: Array(connectionsByID.values).sorted { $0.id < $1.id },
+            issues: structuredIssues,
+            inventoryCompleteness: inventory,
+            providerMessages: Self.normalizeProviderMessages(messages)
         )
-        let mapped = dto.accounts.map { mapAccount($0, connectionsByID: connectionsByID) }
-        let accounts = Self.applyingSyncIssues(to: mapped, errors: dto.errlist ?? [])
-        return RemoteSyncPayload(accounts: accounts, providerMessages: messages)
     }
 
     /// Splits `[start, end]` into inclusive windows of at most `maxDays` days,
@@ -238,27 +260,45 @@ public struct SimpleFINClient: Sendable {
         return windows
     }
 
-    static func mergePayloads(_ payloads: [RemoteSyncPayload]) -> RemoteSyncPayload {
+    static func mergePayloads(
+        _ payloads: [RemoteSyncPayload],
+        source: ProviderLinkIdentity
+    ) -> RemoteSyncPayload {
         guard !payloads.isEmpty else {
-            return RemoteSyncPayload(accounts: [], providerMessages: [])
+            return RemoteSyncPayload(source: source, accounts: [], providerMessages: [])
         }
 
-        var accountsByID: [String: RemoteAccountSnapshot] = [:]
+        var accountsByKey: [String: RemoteAccountSnapshot] = [:]
+        var connectionsByID: [String: RemoteProviderConnection] = [:]
+        var issues: [RemoteProviderIssue] = []
         var messages: [String] = []
+        var inventory: RemoteInventoryCompleteness = .complete
 
         for payload in payloads {
+            if payload.inventoryCompleteness == .incomplete {
+                inventory = .incomplete
+            }
             messages.append(contentsOf: payload.providerMessages)
+            issues.append(contentsOf: payload.issues)
+            for connection in payload.connections {
+                connectionsByID[connection.id] = connection
+            }
             for account in payload.accounts {
-                if let existing = accountsByID[account.externalID] {
-                    accountsByID[account.externalID] = mergeAccounts(existing, account)
+                let key = account.identityKey
+                if let existing = accountsByKey[key] {
+                    accountsByKey[key] = mergeAccounts(existing, account)
                 } else {
-                    accountsByID[account.externalID] = account
+                    accountsByKey[key] = account
                 }
             }
         }
 
         return RemoteSyncPayload(
-            accounts: Array(accountsByID.values).sorted { $0.externalID < $1.externalID },
+            source: source,
+            accounts: Array(accountsByKey.values).sorted { $0.identityKey < $1.identityKey },
+            connections: Array(connectionsByID.values).sorted { $0.id < $1.id },
+            issues: dedupeIssues(issues),
+            inventoryCompleteness: inventory,
             providerMessages: normalizeProviderMessages(messages)
         )
     }
@@ -299,16 +339,28 @@ public struct SimpleFINClient: Sendable {
         let preferRHS = rhs.balanceDate >= lhs.balanceDate
         let primary = preferRHS ? rhs : lhs
         let institutionName = Self.preferredInstitutionName(lhs.institutionName, rhs.institutionName)
+        let completeness: RemoteTransactionCompleteness = {
+            if lhs.transactionCompleteness == .authoritative
+                && rhs.transactionCompleteness == .authoritative
+            {
+                return .authoritative
+            }
+            return .incomplete
+        }()
+        let issues = dedupeIssues(lhs.issues + rhs.issues)
         return RemoteAccountSnapshot(
-            externalID: primary.externalID,
+            identity: primary.identity,
             name: primary.name,
+            providerName: primary.providerName,
             institutionName: institutionName,
+            organization: primary.organization ?? lhs.organization ?? rhs.organization,
             currencyCode: primary.currencyCode,
             balance: primary.balance,
             balanceDate: primary.balanceDate,
             transactions: Array(transactionsByID.values),
-            connectionExternalID: primary.connectionExternalID ?? lhs.connectionExternalID ?? rhs.connectionExternalID,
-            syncIssue: mergeSyncIssues(lhs.syncIssue, rhs.syncIssue)
+            transactionCompleteness: completeness,
+            syncIssue: mergeSyncIssues(lhs.syncIssue, rhs.syncIssue),
+            issues: issues
         )
     }
 
@@ -328,82 +380,101 @@ public struct SimpleFINClient: Sendable {
         return unique.joined(separator: " ")
     }
 
-    /// Attaches Bridge `errlist` entries to accounts by `account_id`, then `conn_id`, then globally.
+    static func mapIssues(_ errors: [SimpleFINErrorDTO]) -> [RemoteProviderIssue] {
+        errors.compactMap { error in
+            let message = error.msg.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !message.isEmpty, !isBenignDateRangeAdvisory(message) else { return nil }
+            let accountID = error.accountID?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let connID = error.connID?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let scope: RemoteProviderIssueScope
+            if !accountID.isEmpty {
+                scope = .account(connectionID: connID, accountID: accountID)
+            } else if !connID.isEmpty {
+                scope = .connection(connID)
+            } else {
+                scope = .global
+            }
+            return RemoteProviderIssue(code: error.code, message: message, scope: scope)
+        }
+    }
+
+    static func mapConnection(_ dto: SimpleFINConnectionDTO) -> RemoteProviderConnection {
+        RemoteProviderConnection(
+            id: dto.connID,
+            name: dto.name,
+            organization: RemoteOrganization(
+                id: dto.orgID,
+                name: dto.orgName,
+                url: dto.orgURL,
+                sfinURL: dto.sfinURL
+            )
+        )
+    }
+
+    static func inventoryCompleteness(
+        issues: [RemoteProviderIssue],
+        accountCount: Int
+    ) -> RemoteInventoryCompleteness {
+        if issues.contains(where: {
+            switch $0.scope {
+            case .global: return true
+            case .connection: return true
+            case .account: return false
+            }
+        }) {
+            return .incomplete
+        }
+        _ = accountCount
+        return .complete
+    }
+
     static func applyingSyncIssues(
         to accounts: [RemoteAccountSnapshot],
-        errors: [SimpleFINErrorDTO]
+        issues: [RemoteProviderIssue]
     ) -> [RemoteAccountSnapshot] {
-        guard !errors.isEmpty else {
-            return accounts.map {
-                RemoteAccountSnapshot(
-                    externalID: $0.externalID,
-                    name: $0.name,
-                    institutionName: $0.institutionName,
-                    currencyCode: $0.currencyCode,
-                    balance: $0.balance,
-                    balanceDate: $0.balanceDate,
-                    transactions: $0.transactions,
-                    connectionExternalID: $0.connectionExternalID,
-                    syncIssue: nil
-                )
+        accounts.map { account in
+            let matched = issues.filter { issue in
+                switch issue.scope {
+                case .global:
+                    return true
+                case .connection(let connID):
+                    return connID == account.identity.connectionID
+                case .account(let connID, let accountID):
+                    guard accountID == account.identity.accountID else { return false }
+                    if connID.isEmpty { return true }
+                    return connID == account.identity.connectionID
+                }
             }
-        }
-
-        return accounts.map { account in
-            let messages = relevantSyncMessages(for: account, errors: errors)
+            let blocksAuthority = matched.contains(where: \.blocksAuthoritativeTransactions)
+            let completeness: RemoteTransactionCompleteness =
+                blocksAuthority ? .incomplete : account.transactionCompleteness
+            let syncIssue = matched.map(\.message).joined(separator: " ")
             return RemoteAccountSnapshot(
-                externalID: account.externalID,
+                identity: account.identity,
                 name: account.name,
+                providerName: account.providerName,
                 institutionName: account.institutionName,
+                organization: account.organization,
                 currencyCode: account.currencyCode,
                 balance: account.balance,
                 balanceDate: account.balanceDate,
                 transactions: account.transactions,
-                connectionExternalID: account.connectionExternalID,
-                syncIssue: messages.isEmpty ? nil : messages.joined(separator: " ")
+                transactionCompleteness: completeness,
+                syncIssue: syncIssue.isEmpty ? nil : syncIssue,
+                issues: matched
             )
         }
     }
 
-    private static func relevantSyncMessages(
-        for account: RemoteAccountSnapshot,
-        errors: [SimpleFINErrorDTO]
-    ) -> [String] {
+    private static func dedupeIssues(_ issues: [RemoteProviderIssue]) -> [RemoteProviderIssue] {
         var seen = Set<String>()
-        var messages: [String] = []
-        for error in errors {
-            let message = error.msg.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !message.isEmpty, !isBenignDateRangeAdvisory(message) else { continue }
-
-            let accountID = error.accountID?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            let connID = error.connID?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-
-            let matches: Bool
-            if !accountID.isEmpty {
-                matches = accountID == account.externalID
-                    || messageMatchesAccountIdentity(
-                        message,
-                        name: account.name,
-                        institutionName: account.institutionName
-                    )
-            } else if !connID.isEmpty {
-                matches = connID == account.connectionExternalID
-                    || messageMatchesAccountIdentity(
-                        message,
-                        name: account.name,
-                        institutionName: account.institutionName
-                    )
-            } else {
-                // Unscoped provider errors apply to every account in the payload.
-                matches = true
-            }
-            guard matches else { continue }
-
-            let key = message.lowercased()
+        var result: [RemoteProviderIssue] = []
+        for issue in issues {
+            let key = "\(issue.code)|\(issue.message.lowercased())|\(String(describing: issue.scope))"
             guard seen.insert(key).inserted else { continue }
-            messages.append(message)
+            result.append(issue)
         }
-        return messages
+        return result
     }
 
     /// Bridge errlist copy often names the FI/account even when ids are missing or stale.
@@ -426,21 +497,24 @@ public struct SimpleFINClient: Sendable {
 
     private func mapAccount(
         _ dto: SimpleFINAccountDTO,
-        connectionsByID: [String: SimpleFINConnectionDTO]
+        link: ProviderLinkIdentity,
+        connectionsByID: [String: RemoteProviderConnection],
+        issues: [RemoteProviderIssue]
     ) -> RemoteAccountSnapshot {
-        let connection = dto.connID.flatMap { connectionsByID[$0] }
+        let connectionID = dto.connID?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let connection = connectionsByID[connectionID]
         let institution = Self.institutionName(
             account: dto,
-            connection: connection
+            connectionName: connection?.name,
+            organization: connection?.organization
         )
         let balance = Decimal(string: dto.balance) ?? 0
+        let transactionsPresent = dto.transactions != nil
         let txs = (dto.transactions ?? []).compactMap { tx -> RemoteTransactionSnapshot? in
             let posted = tx.posted
             let pending = tx.pending ?? (posted == 0)
             guard let amount = Decimal(string: tx.amount) else { return nil }
             let sanitizedDescription = sanitize(tx.description)
-            // Pending often arrives with `posted == 0`. Use "now" so list sort/sections
-            // stay current; MergeSyncPolicy keeps the first-seen date across re-syncs.
             let postedDate = posted == 0
                 ? Date.now
                 : Date(timeIntervalSince1970: TimeInterval(posted))
@@ -453,32 +527,60 @@ public struct SimpleFINClient: Sendable {
                 suggestedCategoryID: SystemCategory.undefined.id
             )
         }
+        let identity = RemoteAccountIdentity(
+            link: link,
+            connectionID: connectionID,
+            accountID: dto.id
+        )
+        let accountIssues = issues.filter {
+            switch $0.scope {
+            case .account(let connID, let id):
+                guard id == dto.id else { return false }
+                if connID.isEmpty { return true }
+                return connID == connectionID
+            case .connection(let id):
+                return id == connectionID
+            case .global:
+                return true
+            }
+        }
+        let completeness: RemoteTransactionCompleteness = {
+            if !transactionsPresent { return .incomplete }
+            if accountIssues.contains(where: \.blocksAuthoritativeTransactions) {
+                return .incomplete
+            }
+            return .authoritative
+        }()
+        let sanitizedName = sanitize(dto.name)
         return RemoteAccountSnapshot(
-            externalID: dto.id,
-            name: sanitize(dto.name),
+            identity: identity,
+            name: sanitizedName,
+            providerName: sanitizedName,
             institutionName: sanitize(institution),
+            organization: connection?.organization,
             currencyCode: dto.currency.count == 3 ? dto.currency : "USD",
             balance: balance,
             balanceDate: Date(timeIntervalSince1970: TimeInterval(dto.balanceDate)),
             transactions: txs,
-            connectionExternalID: dto.connID
+            transactionCompleteness: completeness,
+            issues: accountIssues
         )
     }
 
-    /// Resolves a bank/institution display name from v2 `connections` (preferred) or legacy `org`.
+    /// Resolves a bank/institution display name from v2 connections (preferred) or legacy `org`.
     static func institutionName(
         account: SimpleFINAccountDTO,
-        connection: SimpleFINConnectionDTO?
+        connectionName: String?,
+        organization: RemoteOrganization?
     ) -> String {
-        if let orgName = connection?.orgName?.trimmingCharacters(in: .whitespacesAndNewlines),
+        if let orgName = organization?.name?.trimmingCharacters(in: .whitespacesAndNewlines),
            !orgName.isEmpty
         {
             return orgName
         }
-        if let connectionName = connection?.name.trimmingCharacters(in: .whitespacesAndNewlines),
+        if let connectionName = connectionName?.trimmingCharacters(in: .whitespacesAndNewlines),
            !connectionName.isEmpty
         {
-            // Bridge often uses "American Express - Collin" for the connection nickname.
             if let dash = connectionName.range(of: " - ") {
                 let institution = String(connectionName[..<dash.lowerBound])
                     .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -506,13 +608,27 @@ public struct SimpleFINClient: Sendable {
         {
             return domain
         }
-        if let orgURL = connection?.orgURL?.trimmingCharacters(in: .whitespacesAndNewlines),
+        if let orgURL = organization?.url?.trimmingCharacters(in: .whitespacesAndNewlines),
            let host = URL(string: orgURL)?.host,
            !host.isEmpty
         {
             return host.replacingOccurrences(of: "www.", with: "")
         }
         return "Unknown institution"
+    }
+
+    /// Compatibility overload used by older tests.
+    static func institutionName(
+        account: SimpleFINAccountDTO,
+        connection: SimpleFINConnectionDTO?
+    ) -> String {
+        institutionName(
+            account: account,
+            connectionName: connection?.name,
+            organization: connection.map {
+                RemoteOrganization(id: $0.orgID, name: $0.orgName, url: $0.orgURL, sfinURL: $0.sfinURL)
+            }
+        )
     }
 
     private static func preferredInstitutionName(_ lhs: String, _ rhs: String) -> String {

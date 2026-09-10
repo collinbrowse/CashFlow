@@ -17,20 +17,35 @@ public actor SimpleFINBankLinkingService: BankLinkingServing {
     }
 
     public func connectionStatus() async -> LinkedConnection {
-        let linked = (try? accessURLStore.load()) != nil
+        let envelope = try? accessURLStore.loadEnvelope()
         return LinkedConnection(
-            isLinked: linked,
+            isLinked: envelope != nil,
             providerName: providerName,
             needsReauth: needsReauth,
-            lastSuccessfulSyncAt: nil
+            lastSuccessfulSyncAt: nil,
+            linkNamespace: envelope?.linkNamespace
         )
     }
 
-    public func link(withSetupToken token: String) async throws {
+    @discardableResult
+    public func link(
+        withSetupToken token: String,
+        preservingLinkNamespace: String?
+    ) async throws -> BankLinkReceipt {
         let accessURL = try await client.claimAccessURL(setupToken: token)
-        try accessURLStore.save(accessURL)
+        let reused = preservingLinkNamespace?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let linkNamespace = reused.isEmpty ? UUID().uuidString : reused
+        let envelope = SimpleFINCredentialEnvelope(
+            accessURL: accessURL,
+            linkNamespace: linkNamespace
+        )
+        try accessURLStore.save(envelope)
         needsReauth = false
         _ = try? await client.fetchInfo(accessURL: accessURL)
+        return BankLinkReceipt(
+            link: ProviderLinkIdentity(source: .simpleFIN, linkNamespace: linkNamespace),
+            providerName: providerName
+        )
     }
 
     public func unlink(removeLocalData: Bool) async throws {
@@ -67,12 +82,17 @@ public actor SimpleFINBankLinkingService: BankLinkingServing {
         stopAfterConsecutiveEmpty: Int?,
         onWindowProgress: (@Sendable (_ completed: Int, _ total: Int) -> Void)?
     ) async throws -> SimpleFINClient.WindowedFetchResult {
-        guard let accessURL = try accessURLStore.load() else {
+        guard let envelope = try accessURLStore.loadEnvelope() else {
             throw CashFlowError.notLinked
         }
+        let link = ProviderLinkIdentity(
+            source: .simpleFIN,
+            linkNamespace: envelope.linkNamespace
+        )
         do {
             let result = try await client.fetchAccountsWindowed(
-                accessURL: accessURL,
+                accessURL: envelope.accessURL,
+                link: link,
                 startDate: startDate,
                 endDate: endDate,
                 maxWindows: maxWindows,
