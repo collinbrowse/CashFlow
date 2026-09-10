@@ -10,14 +10,11 @@ struct SyncMergeEngineTests {
     func idempotentUpsert() async throws {
         let container = try ModelContainerFactory.make(inMemory: true)
         let context = ModelContext(container)
-        let payload = RemoteSyncPayload(accounts: [
-            RemoteAccountSnapshot(
-                externalID: "a1",
+        let payload = RemoteSyncTestFixtures.demoPayload(accounts: [
+            RemoteSyncTestFixtures.account(
+                identity: RemoteSyncTestFixtures.demoIdentity(accountID: "a1"),
                 name: "Checking",
-                institutionName: "Bank",
-                currencyCode: "USD",
                 balance: 100,
-                balanceDate: .now,
                 transactions: [
                     RemoteTransactionSnapshot(
                         externalID: "t1",
@@ -43,14 +40,11 @@ struct SyncMergeEngineTests {
         let repo = SwiftDataTransactionRepository(modelContainer: container)
         let context = ModelContext(container)
 
-        let payload = RemoteSyncPayload(accounts: [
-            RemoteAccountSnapshot(
-                externalID: "a1",
+        let payload = RemoteSyncTestFixtures.demoPayload(accounts: [
+            RemoteSyncTestFixtures.account(
+                identity: RemoteSyncTestFixtures.demoIdentity(accountID: "a1"),
                 name: "Checking",
-                institutionName: "Bank",
-                currencyCode: "USD",
                 balance: 100,
-                balanceDate: .now,
                 transactions: [
                     RemoteTransactionSnapshot(
                         externalID: "t1",
@@ -72,14 +66,11 @@ struct SyncMergeEngineTests {
             categoryLocked: false
         )
 
-        let updatedPayload = RemoteSyncPayload(accounts: [
-            RemoteAccountSnapshot(
-                externalID: "a1",
+        let updatedPayload = RemoteSyncTestFixtures.demoPayload(accounts: [
+            RemoteSyncTestFixtures.account(
+                identity: RemoteSyncTestFixtures.demoIdentity(accountID: "a1"),
                 name: "Checking",
-                institutionName: "Bank",
-                currencyCode: "USD",
                 balance: 100,
-                balanceDate: .now,
                 transactions: [
                     RemoteTransactionSnapshot(
                         externalID: "t1",
@@ -107,14 +98,11 @@ struct SyncMergeEngineTests {
         let repo = SwiftDataAccountRepository(modelContainer: container)
         let context = ModelContext(container)
 
-        let payload = RemoteSyncPayload(accounts: [
-            RemoteAccountSnapshot(
-                externalID: "a1",
+        let payload = RemoteSyncTestFixtures.demoPayload(accounts: [
+            RemoteSyncTestFixtures.account(
+                identity: RemoteSyncTestFixtures.demoIdentity(accountID: "a1"),
                 name: "Checking",
-                institutionName: "Bank",
-                currencyCode: "USD",
                 balance: 100,
-                balanceDate: .now,
                 transactions: []
             ),
         ])
@@ -124,14 +112,11 @@ struct SyncMergeEngineTests {
         let id = try #require(accounts.first?.id)
         try await repo.updateName(accountID: id, name: "Everyday Spending")
 
-        let updatedPayload = RemoteSyncPayload(accounts: [
-            RemoteAccountSnapshot(
-                externalID: "a1",
+        let updatedPayload = RemoteSyncTestFixtures.demoPayload(accounts: [
+            RemoteSyncTestFixtures.account(
+                identity: RemoteSyncTestFixtures.demoIdentity(accountID: "a1"),
                 name: "CHK ****1234",
-                institutionName: "Bank",
-                currencyCode: "USD",
                 balance: 250,
-                balanceDate: .now,
                 transactions: []
             ),
         ])
@@ -150,16 +135,12 @@ struct SyncMergeEngineTests {
     func accountSyncIssueRoundTrip() async throws {
         let container = try ModelContainerFactory.make(inMemory: true)
         let context = ModelContext(container)
-        let broken = RemoteSyncPayload(accounts: [
-            RemoteAccountSnapshot(
-                externalID: "a1",
+        let broken = RemoteSyncTestFixtures.demoPayload(accounts: [
+            RemoteSyncTestFixtures.account(
+                identity: RemoteSyncTestFixtures.demoIdentity(accountID: "a1", connectionID: "c1"),
                 name: "Checking",
-                institutionName: "Bank",
-                currencyCode: "USD",
                 balance: 10,
-                balanceDate: .now,
                 transactions: [],
-                connectionExternalID: "c1",
                 syncIssue: "Authentication failed for Bank"
             ),
         ])
@@ -170,16 +151,12 @@ struct SyncMergeEngineTests {
         #expect(afterBroken.syncIssue == "Authentication failed for Bank")
         #expect(afterBroken.hasSyncIssue)
 
-        let healthy = RemoteSyncPayload(accounts: [
-            RemoteAccountSnapshot(
-                externalID: "a1",
+        let healthy = RemoteSyncTestFixtures.demoPayload(accounts: [
+            RemoteSyncTestFixtures.account(
+                identity: RemoteSyncTestFixtures.demoIdentity(accountID: "a1", connectionID: "c1"),
                 name: "Checking",
-                institutionName: "Bank",
-                currencyCode: "USD",
                 balance: 12,
-                balanceDate: .now,
                 transactions: [],
-                connectionExternalID: "c1",
                 syncIssue: nil
             ),
         ])
@@ -196,14 +173,11 @@ struct SyncMergeEngineTests {
         let context = ModelContext(container)
         let pendingDate = Date(timeIntervalSince1970: 1_700_000_000)
 
-        let pendingPayload = RemoteSyncPayload(accounts: [
-            RemoteAccountSnapshot(
-                externalID: "a1",
+        let pendingPayload = RemoteSyncTestFixtures.demoPayload(accounts: [
+            RemoteSyncTestFixtures.account(
+                identity: RemoteSyncTestFixtures.demoIdentity(accountID: "a1"),
                 name: "Card",
-                institutionName: "Bank",
-                currencyCode: "USD",
                 balance: -50,
-                balanceDate: .now,
                 transactions: [
                     RemoteTransactionSnapshot(
                         externalID: "t-pending",
@@ -224,14 +198,11 @@ struct SyncMergeEngineTests {
         #expect(pendingTx.isPending)
         #expect(pendingTx.amount == -42)
 
-        let postedPayload = RemoteSyncPayload(accounts: [
-            RemoteAccountSnapshot(
-                externalID: "a1",
+        let postedPayload = RemoteSyncTestFixtures.demoPayload(accounts: [
+            RemoteSyncTestFixtures.account(
+                identity: RemoteSyncTestFixtures.demoIdentity(accountID: "a1"),
                 name: "Card",
-                institutionName: "Bank",
-                currencyCode: "USD",
                 balance: -50,
-                balanceDate: .now,
                 transactions: [
                     RemoteTransactionSnapshot(
                         externalID: "t-pending",
@@ -258,14 +229,11 @@ struct SyncMergeEngineTests {
         let container = try ModelContainerFactory.make(inMemory: true)
         let context = ModelContext(container)
 
-        let withPending = RemoteSyncPayload(accounts: [
-            RemoteAccountSnapshot(
-                externalID: "a1",
+        let withPending = RemoteSyncTestFixtures.demoPayload(accounts: [
+            RemoteSyncTestFixtures.account(
+                identity: RemoteSyncTestFixtures.demoIdentity(accountID: "a1"),
                 name: "Card",
-                institutionName: "Bank",
-                currencyCode: "USD",
                 balance: -10,
-                balanceDate: .now,
                 transactions: [
                     RemoteTransactionSnapshot(
                         externalID: "gone",
@@ -280,14 +248,11 @@ struct SyncMergeEngineTests {
         try SyncMergeEngine.merge(payload: withPending, into: context)
         #expect(try context.fetch(FetchDescriptor<TransactionEntity>()).count == 1)
 
-        let cleared = RemoteSyncPayload(accounts: [
-            RemoteAccountSnapshot(
-                externalID: "a1",
+        let cleared = RemoteSyncTestFixtures.demoPayload(accounts: [
+            RemoteSyncTestFixtures.account(
+                identity: RemoteSyncTestFixtures.demoIdentity(accountID: "a1"),
                 name: "Card",
-                institutionName: "Bank",
-                currencyCode: "USD",
                 balance: -10,
-                balanceDate: .now,
                 transactions: []
             ),
         ])
@@ -303,14 +268,11 @@ struct SyncMergeEngineTests {
         let tagRepo = SwiftDataTagRepository(modelContainer: container)
         let context = ModelContext(container)
 
-        let payload = RemoteSyncPayload(accounts: [
-            RemoteAccountSnapshot(
-                externalID: "a1",
+        let payload = RemoteSyncTestFixtures.demoPayload(accounts: [
+            RemoteSyncTestFixtures.account(
+                identity: RemoteSyncTestFixtures.demoIdentity(accountID: "a1"),
                 name: "Checking",
-                institutionName: "Bank",
-                currencyCode: "USD",
                 balance: 100,
-                balanceDate: .now,
                 transactions: [
                     RemoteTransactionSnapshot(
                         externalID: "t1",
@@ -329,14 +291,11 @@ struct SyncMergeEngineTests {
         let id = try #require(page.items.first?.id)
         try await txRepo.updateTags(transactionID: id, tagIDs: [tag.id])
 
-        let updatedPayload = RemoteSyncPayload(accounts: [
-            RemoteAccountSnapshot(
-                externalID: "a1",
+        let updatedPayload = RemoteSyncTestFixtures.demoPayload(accounts: [
+            RemoteSyncTestFixtures.account(
+                identity: RemoteSyncTestFixtures.demoIdentity(accountID: "a1"),
                 name: "Checking",
-                institutionName: "Bank",
-                currencyCode: "USD",
                 balance: 90,
-                balanceDate: .now,
                 transactions: [
                     RemoteTransactionSnapshot(
                         externalID: "t1",
@@ -359,7 +318,7 @@ struct SyncMergeEngineTests {
     func keysetPagination() async throws {
         let container = try ModelContainerFactory.make(inMemory: true)
         let demo = DemoBankLinkingService(seedSize: .standard)
-        try await demo.link(withSetupToken: "demo")
+        _ = try await demo.link(withSetupToken: "demo")
         let payload = try await demo.fetchAccounts(startDate: nil, endDate: nil)
         let context = ModelContext(container)
         try SyncMergeEngine.merge(payload: payload, into: context)

@@ -51,7 +51,8 @@ public actor SyncCoordinator: SyncServing {
                     isLinked: true,
                     providerName: "SimpleFIN",
                     needsReauth: entity?.needsReauth ?? false,
-                    lastSuccessfulSyncAt: entity?.lastSuccessfulSyncAt
+                    lastSuccessfulSyncAt: entity?.lastSuccessfulSyncAt,
+                    linkNamespace: entity?.linkNamespace ?? simpleLinked.linkNamespace
                 )
             }
             await bankLinking.adoptDurableDemoLink()
@@ -59,7 +60,8 @@ public actor SyncCoordinator: SyncServing {
                 isLinked: true,
                 providerName: "Demo",
                 needsReauth: entity?.needsReauth ?? false,
-                lastSuccessfulSyncAt: entity?.lastSuccessfulSyncAt
+                lastSuccessfulSyncAt: entity?.lastSuccessfulSyncAt,
+                linkNamespace: entity?.linkNamespace ?? DemoBankLinkingService.linkNamespace
             )
         }
 
@@ -72,7 +74,20 @@ public actor SyncCoordinator: SyncServing {
             isLinked: true,
             providerName: credentials.providerName,
             needsReauth: entity?.needsReauth ?? credentials.needsReauth,
-            lastSuccessfulSyncAt: entity?.lastSuccessfulSyncAt
+            lastSuccessfulSyncAt: entity?.lastSuccessfulSyncAt,
+            linkNamespace: entity?.linkNamespace ?? credentials.linkNamespace
+        )
+    }
+
+    /// Durable connection row for lifecycle / repair (secret-free).
+    public func storedConnectionMetadata() async -> ConnectionEntitySnapshot? {
+        let context = ModelContext(modelContainer)
+        guard let entity = try? fetchConnection(context: context) else { return nil }
+        return ConnectionEntitySnapshot(
+            providerName: entity.providerName,
+            isDemo: entity.isDemo,
+            source: entity.source,
+            linkNamespace: entity.linkNamespace
         )
     }
 
@@ -215,30 +230,49 @@ public actor SyncCoordinator: SyncServing {
             )
             try Task.checkCancellation()
             emit(SyncProgress(phase: .saving))
-            try SyncMergeEngine.merge(payload: result.payload, into: context)
+            let syncedAt = Date.now
+            let coversPresent = fetchEnd.map { $0.timeIntervalSinceNow > -300 } ?? true
+            try SyncMergeEngine.merge(
+                payload: result.payload,
+                into: context,
+                syncedAt: syncedAt,
+                pruneStalePending: coversPresent,
+                persist: false
+            )
 
             let providerName = await bankLinking.activeProviderName()
             let connection = try upsertConnection(
                 context: context,
                 providerName: providerName,
                 needsReauth: false,
-                syncedAt: .now,
+                syncedAt: syncedAt,
                 isDemo: providerName == "Demo",
+                source: result.payload.source.source,
+                linkNamespace: result.payload.source.linkNamespace,
+                inventoryCompleteness: result.payload.inventoryCompleteness,
                 historyBackfillComplete: existing?.historyBackfillComplete ?? false
             )
+            connection.lastSyncIssuesData = result.payload.issues.isEmpty
+                ? nil
+                : try JSONEncoder().encode(result.payload.issues)
 
             if isBackfill {
-                let previousEarliest = connection.earliestFetchedDate
-                let newEarliest = previousEarliest.map { min($0, result.fetchedStart) } ?? result.fetchedStart
-                connection.earliestFetchedDate = newEarliest
-                connection.lastBackfillAdvanceAt = .now
+                if result.payload.inventoryCompleteness == .complete {
+                    let previousEarliest = connection.earliestFetchedDate
+                    let newEarliest = previousEarliest.map { min($0, result.fetchedStart) } ?? result.fetchedStart
+                    connection.earliestFetchedDate = newEarliest
+                    connection.lastBackfillAdvanceAt = .now
 
-                let reachedTarget = newEarliest <= targetStart.addingTimeInterval(86_400)
-                let bankRanDry = result.consecutiveEmptyTrailing >= Self.consecutiveEmptyWindowsToStop
-                let demoDone = providerName == "Demo"
-                if demoDone || reachedTarget || bankRanDry {
-                    connection.historyComplete = true
-                    connection.historyBackfillComplete = true
+                    let reachedTarget = newEarliest <= targetStart.addingTimeInterval(86_400)
+                    let bankRanDry = result.consecutiveEmptyTrailing >= Self.consecutiveEmptyWindowsToStop
+                    let demoDone = providerName == "Demo"
+                    if demoDone || reachedTarget || bankRanDry {
+                        connection.historyComplete = true
+                        connection.historyBackfillComplete = true
+                    } else {
+                        connection.historyComplete = false
+                        connection.historyBackfillComplete = false
+                    }
                 } else {
                     connection.historyComplete = false
                     connection.historyBackfillComplete = false
@@ -271,7 +305,8 @@ public actor SyncCoordinator: SyncServing {
                 providerName: providerName,
                 needsReauth: false,
                 lastSuccessfulSyncAt: connection.lastSuccessfulSyncAt,
-                providerMessages: result.payload.providerMessages.map(Self.sanitize)
+                providerMessages: result.payload.providerMessages.map(Self.sanitize),
+                linkNamespace: connection.linkNamespace
             )
         } catch let error as CashFlowError {
             if case .unauthorized = error {
@@ -282,6 +317,9 @@ public actor SyncCoordinator: SyncServing {
                     needsReauth: true,
                     syncedAt: nil,
                     isDemo: false,
+                    source: .simpleFIN,
+                    linkNamespace: existing?.linkNamespace,
+                    inventoryCompleteness: existing?.inventoryCompleteness ?? .incomplete,
                     historyBackfillComplete: existing?.historyBackfillComplete ?? false
                 )
                 try? context.save()
@@ -310,12 +348,20 @@ public actor SyncCoordinator: SyncServing {
         needsReauth: Bool,
         syncedAt: Date?,
         isDemo: Bool,
+        source: ProviderSource,
+        linkNamespace: String?,
+        inventoryCompleteness: RemoteInventoryCompleteness,
         historyBackfillComplete: Bool
     ) throws -> ConnectionEntity {
         if let existing = try fetchConnection(context: context) {
             existing.providerName = providerName
             existing.needsReauth = needsReauth
             existing.isDemo = isDemo
+            existing.source = source
+            if let linkNamespace {
+                existing.linkNamespace = linkNamespace
+            }
+            existing.inventoryCompleteness = inventoryCompleteness
             existing.historyBackfillComplete = historyBackfillComplete
             if let syncedAt {
                 existing.lastSuccessfulSyncAt = syncedAt
@@ -327,6 +373,9 @@ public actor SyncCoordinator: SyncServing {
             needsReauth: needsReauth,
             lastSuccessfulSyncAt: syncedAt,
             isDemo: isDemo,
+            source: source,
+            linkNamespace: linkNamespace,
+            inventoryCompleteness: inventoryCompleteness,
             historyBackfillComplete: historyBackfillComplete
         )
         context.insert(entity)
@@ -360,6 +409,26 @@ public actor SyncCoordinator: SyncServing {
 
     private static func sanitize(_ string: String) -> String {
         string.replacingOccurrences(of: "<", with: "").replacingOccurrences(of: ">", with: "")
+    }
+}
+
+/// Secret-free snapshot of durable connection lineage for lifecycle callers.
+public struct ConnectionEntitySnapshot: Sendable, Equatable {
+    public let providerName: String
+    public let isDemo: Bool
+    public let source: ProviderSource
+    public let linkNamespace: String?
+
+    public init(
+        providerName: String,
+        isDemo: Bool,
+        source: ProviderSource,
+        linkNamespace: String?
+    ) {
+        self.providerName = providerName
+        self.isDemo = isDemo
+        self.source = source
+        self.linkNamespace = linkNamespace
     }
 }
 

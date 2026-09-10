@@ -9,7 +9,7 @@ struct SyncHistoryBackfillTests {
     @Test("Incomplete history walks backward instead of using incremental watermark")
     func incompleteBackfillIgnoresWatermark() async throws {
         let accessStore = InMemoryAccessURLStore()
-        try accessStore.save("https://user:pass@example.com/simplefin")
+        try accessStore.saveTestAccessURL("https://user:pass@example.com/simplefin")
 
         let http = RecordingAccountsHTTPClient()
         let linking = CompositeBankLinkingService(
@@ -61,7 +61,7 @@ struct SyncHistoryBackfillTests {
     @Test("resetLocalDataKeepingLink clears historyBackfillComplete")
     func resetClearsBackfillFlag() async throws {
         let accessStore = InMemoryAccessURLStore()
-        try accessStore.save("https://user:pass@example.com/simplefin")
+        try accessStore.saveTestAccessURL("https://user:pass@example.com/simplefin")
         let http = RecordingAccountsHTTPClient()
         let linking = CompositeBankLinkingService(
             demo: DemoBankLinkingService(),
@@ -89,29 +89,47 @@ struct SyncHistoryBackfillTests {
         #expect(after?.historyComplete == false)
         #expect(after?.earliestFetchedDate == nil)
     }
+
+    @Test("Incomplete inventory does not advance earliestFetchedDate or complete history")
+    func incompleteDoesNotAdvanceWatermark() async throws {
+        let accessStore = InMemoryAccessURLStore()
+        try accessStore.saveTestAccessURL("https://user:pass@example.com/simplefin")
+        let http = IncompleteInventoryHTTPClient()
+        let linking = CompositeBankLinkingService(
+            demo: DemoBankLinkingService(),
+            simpleFIN: SimpleFINBankLinkingService(
+                client: SimpleFINClient(http: http),
+                accessURLStore: accessStore
+            ),
+            initialMode: .simpleFIN
+        )
+        let container = try ModelContainerFactory.make(inMemory: true)
+        let watermark = Date(timeIntervalSince1970: 1_700_000_000)
+        let seed = ModelContext(container)
+        seed.insert(
+            ConnectionEntity(
+                providerName: "SimpleFIN",
+                needsReauth: false,
+                lastSuccessfulSyncAt: .now,
+                isDemo: false,
+                earliestFetchedDate: watermark,
+                historyComplete: false,
+                historyBackfillComplete: false
+            )
+        )
+        try seed.save()
+
+        let sync = SyncCoordinator(modelContainer: container, bankLinking: linking)
+        _ = try await sync.syncNow()
+
+        let after = try #require(try ModelContext(container).fetch(FetchDescriptor<ConnectionEntity>()).first)
+        #expect(after.earliestFetchedDate == watermark)
+        #expect(after.historyComplete == false)
+        #expect(after.historyBackfillComplete == false)
+    }
 }
 
 // MARK: - Stubs
-
-private final class InMemoryAccessURLStore: AccessURLStoring, @unchecked Sendable {
-    private let lock = NSLock()
-    private var value: String?
-
-    func save(_ accessURL: String) throws {
-        lock.lock(); defer { lock.unlock() }
-        value = accessURL
-    }
-
-    func load() throws -> String? {
-        lock.lock(); defer { lock.unlock() }
-        return value
-    }
-
-    func delete() throws {
-        lock.lock(); defer { lock.unlock() }
-        value = nil
-    }
-}
 
 private actor RecordingAccountsHTTPClient: HTTPClient {
     private var startDates: [Date] = []
@@ -162,6 +180,26 @@ private actor RecordingAccountsHTTPClient: HTTPClient {
         return (
             Data(),
             HTTPURLResponse(url: url, statusCode: 404, httpVersion: nil, headerFields: nil)!
+        )
+    }
+}
+
+private actor IncompleteInventoryHTTPClient: HTTPClient {
+    func data(for request: URLRequest) async throws -> (Data, HTTPURLResponse) {
+        let url = request.url ?? URL(string: "https://example.com")!
+        let path = url.path
+        if path.contains("info") {
+            return (
+                Data(#"{"versions":["1","2"]}"#.utf8),
+                HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            )
+        }
+        let json = """
+        {"errlist":[{"code":"gen.","msg":"No connections available."}],"accounts":[],"connections":[]}
+        """
+        return (
+            Data(json.utf8),
+            HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!
         )
     }
 }
