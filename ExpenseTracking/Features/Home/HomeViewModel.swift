@@ -47,6 +47,7 @@ final class HomeViewModel {
     private var reloadTask: Task<Void, Never>?
     private var reloadGeneration = 0
     private var syncProgressTask: Task<Void, Never>?
+    private var didKickEmptyLedgerSync = false
 
     init(
         transactionRepository: any TransactionRepository,
@@ -77,6 +78,7 @@ final class HomeViewModel {
         startObservingSyncProgress()
         isOffline = !connectivity.isOnline
         await reload(preferLoadingIndicator: !hasStoreHistory && !hasData)
+        await syncEmptyLinkedLedgerIfNeeded()
     }
 
     private func startObservingSyncProgress() {
@@ -109,6 +111,14 @@ final class HomeViewModel {
     private func scheduleReload(preferLoadingIndicator: Bool) {
         reloadTask?.cancel()
         reloadTask = Task { await reload(preferLoadingIndicator: preferLoadingIndicator) }
+    }
+
+    private func syncEmptyLinkedLedgerIfNeeded() async {
+        guard !didKickEmptyLedgerSync else { return }
+        let status = await syncServing.connectionStatus()
+        guard status.isLinked, status.lastSuccessfulSyncAt == nil, !hasStoreHistory else { return }
+        didKickEmptyLedgerSync = true
+        await refresh()
     }
 
     /// - Parameter preferLoadingIndicator: When true (e.g. empty → first data), show the centered loader.

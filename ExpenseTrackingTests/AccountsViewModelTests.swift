@@ -31,6 +31,7 @@ struct AccountsViewModelTests {
             connectionLifecycle: MockConnectionLifecycle(),
             syncServing: sync,
             accountRepository: accounts,
+            accountDuplicateRepair: RepairDuplicateAccountUseCase(repairing: MockAccountDuplicateRepair()),
             useLargeDemoSeed: false
         )
 
@@ -65,6 +66,7 @@ struct AccountsViewModelTests {
             connectionLifecycle: MockConnectionLifecycle(),
             syncServing: sync,
             accountRepository: MockAccountRepository(accounts: [account]),
+            accountDuplicateRepair: RepairDuplicateAccountUseCase(repairing: MockAccountDuplicateRepair()),
             useLargeDemoSeed: false
         )
 
@@ -74,6 +76,48 @@ struct AccountsViewModelTests {
         #expect(vm.connectionStatusLabel == "Linked")
         #expect(!vm.showsReconnectAction)
         #expect(vm.syncDisplay(for: account) == .healthy)
+    }
+
+    @Test("Two current bank accounts can be repaired")
+    func twoCurrentAccountsOfferRepair() async {
+        let accounts = [
+            Account(
+                id: AccountID("a1"),
+                externalID: "ext-1",
+                name: "Checking",
+                institutionName: "Chase",
+                currencyCode: "USD",
+                balance: 10,
+                balanceDate: .now,
+                providerState: .current
+            ),
+            Account(
+                id: AccountID("a2"),
+                externalID: "ext-2",
+                name: "Checking",
+                institutionName: "Chase",
+                currencyCode: "USD",
+                balance: 20,
+                balanceDate: .now,
+                providerState: .current
+            ),
+        ]
+        let vm = AccountsViewModel(
+            connectionLifecycle: MockConnectionLifecycle(),
+            syncServing: MockAccountsSyncServing(
+                connection: LinkedConnection(
+                    isLinked: true,
+                    providerName: "SimpleFIN",
+                    lastSuccessfulSyncAt: .now
+                )
+            ),
+            accountRepository: MockAccountRepository(accounts: accounts),
+            accountDuplicateRepair: RepairDuplicateAccountUseCase(repairing: MockAccountDuplicateRepair()),
+            useLargeDemoSeed: false
+        )
+        await vm.refreshStatus()
+        #expect(vm.canRepairDuplicates)
+        #expect(!vm.mergeLikelyDuplicates)
     }
 }
 
@@ -85,7 +129,11 @@ private struct MockAccountsSyncServing: SyncServing {
 }
 
 private struct MockConnectionLifecycle: ConnectionLifecycleServing {
-    func replaceAndLink(withSetupToken token: String, deleteLocalData: Bool) async throws -> LinkedConnection {
+    func replaceAndLink(
+        withSetupToken token: String,
+        deleteLocalData: Bool,
+        preservingLinkNamespace: Bool
+    ) async throws -> LinkedConnection {
         LinkedConnection(isLinked: true, providerName: "SimpleFIN")
     }
 
@@ -120,5 +168,19 @@ private struct MockAccountRepository: AccountRepository {
             balance: 0,
             balanceDate: .now
         )
+    }
+}
+
+private struct MockAccountDuplicateRepair: AccountDuplicateRepairing {
+    func currentProviderCandidates(retaining accountID: AccountID) async throws -> [Account] { [] }
+    func preview(
+        retaining accountID: AccountID,
+        adoptingProviderIdentityFrom providerAccountID: AccountID,
+        mergeLikelyDuplicates: Bool
+    ) async throws -> DuplicateAccountRepairPreview {
+        throw CashFlowError.persistence(message: "not used")
+    }
+    func repair(_ command: DuplicateAccountRepairCommand) async throws -> DuplicateAccountRepairResult {
+        throw CashFlowError.persistence(message: "not used")
     }
 }

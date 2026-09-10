@@ -66,7 +66,7 @@ struct AccountsView: View {
                     .accessibilityIdentifier("accounts.demo")
                 } else if viewModel.showsReconnectAction {
                     Button("Reconnect SimpleFIN…") {
-                        viewModel.beginLinkFlow()
+                        confirmAction = .reconnectWithLocalDataChoice
                     }
                     .disabled(viewModel.isWorking)
                     .accessibilityIdentifier("accounts.link")
@@ -79,28 +79,7 @@ struct AccountsView: View {
                         .foregroundStyle(.secondary)
                 } else {
                     ForEach(viewModel.accounts) { account in
-                        Button {
-                            onSelectAccount(account.id)
-                        } label: {
-                            AccountRowView(
-                                account: account,
-                                syncDisplay: viewModel.syncDisplay(for: account)
-                            )
-                        }
-                        .buttonStyle(.plain)
-                        .accessibilityIdentifier("accounts.row.\(account.id.rawValue)")
-                        .accessibilityLabel(accountAccessibilityLabel(account))
-                        .contextMenu {
-                            Button("Rename") {
-                                viewModel.beginRename(account)
-                            }
-                        }
-                        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-                            Button("Rename") {
-                                viewModel.beginRename(account)
-                            }
-                            .tint(.accentColor)
-                        }
+                        accountRow(account)
                     }
                 }
             }
@@ -171,11 +150,26 @@ struct AccountsView: View {
                     Button("Keep local data") {
                         self.confirmAction = nil
                         viewModel.pendingLinkDeletesLocalData = false
+                        viewModel.pendingLinkPreservesNamespace = false
                         viewModel.beginLinkFlow()
                     }
                     Button("Delete local data", role: .destructive) {
                         self.confirmAction = nil
                         viewModel.pendingLinkDeletesLocalData = true
+                        viewModel.pendingLinkPreservesNamespace = false
+                        viewModel.beginLinkFlow()
+                    }
+                case .reconnectWithLocalDataChoice:
+                    Button("Keep local data") {
+                        self.confirmAction = nil
+                        viewModel.pendingLinkDeletesLocalData = false
+                        viewModel.pendingLinkPreservesNamespace = true
+                        viewModel.beginLinkFlow()
+                    }
+                    Button("Delete local data", role: .destructive) {
+                        self.confirmAction = nil
+                        viewModel.pendingLinkDeletesLocalData = true
+                        viewModel.pendingLinkPreservesNamespace = false
                         viewModel.beginLinkFlow()
                     }
                 case .loadDemoWithLocalDataChoice:
@@ -201,7 +195,7 @@ struct AccountsView: View {
                                 await viewModel.resetLocalDataKeepingLink()
                             case .eraseEverything:
                                 await viewModel.eraseEverything()
-                            case .linkWithLocalDataChoice, .loadDemoWithLocalDataChoice:
+                            case .linkWithLocalDataChoice, .loadDemoWithLocalDataChoice, .reconnectWithLocalDataChoice:
                                 break
                             }
                         }
@@ -223,6 +217,12 @@ struct AccountsView: View {
         )) {
             AccountRenameSheet(viewModel: viewModel)
         }
+        .sheet(isPresented: Binding(
+            get: { viewModel.repairingAccountID != nil },
+            set: { if !$0 { viewModel.cancelRepair() } }
+        )) {
+            DuplicateAccountRepairSheet(viewModel: viewModel)
+        }
     }
 }
 
@@ -233,6 +233,7 @@ private enum AccountsConfirmAction: Identifiable {
     case eraseEverything
     case linkWithLocalDataChoice
     case loadDemoWithLocalDataChoice
+    case reconnectWithLocalDataChoice
 
     var id: Self { self }
 
@@ -250,6 +251,8 @@ private enum AccountsConfirmAction: Identifiable {
             return "Local data on this device"
         case .loadDemoWithLocalDataChoice:
             return "Local data on this device"
+        case .reconnectWithLocalDataChoice:
+            return "Reconnect SimpleFIN?"
         }
     }
 
@@ -267,6 +270,8 @@ private enum AccountsConfirmAction: Identifiable {
             return "Keep existing accounts and transactions (including CSV imports), or delete them before linking SimpleFIN. Sync will add bank accounts alongside anything you keep."
         case .loadDemoWithLocalDataChoice:
             return "Keep existing accounts and transactions, or delete them before loading Demo data."
+        case .reconnectWithLocalDataChoice:
+            return "Keep existing accounts so they can match this connection after you paste a new token. Delete only if you want a clean local ledger."
         }
     }
 
@@ -276,12 +281,54 @@ private enum AccountsConfirmAction: Identifiable {
         case .disconnectDeleteData: return "Disconnect & Delete"
         case .resetKeepingLink: return "Clear Data"
         case .eraseEverything: return "Erase Everything"
-        case .linkWithLocalDataChoice, .loadDemoWithLocalDataChoice: return "Continue"
+        case .linkWithLocalDataChoice, .loadDemoWithLocalDataChoice, .reconnectWithLocalDataChoice: return "Continue"
         }
     }
 }
 
 private extension AccountsView {
+    @ViewBuilder
+    func accountRow(_ account: Account) -> some View {
+        Button {
+            onSelectAccount(account.id)
+        } label: {
+            AccountRowView(
+                account: account,
+                syncDisplay: viewModel.syncDisplay(for: account)
+            )
+        }
+        .buttonStyle(.plain)
+        .accessibilityIdentifier("accounts.row.\(account.id.rawValue)")
+        .accessibilityLabel(accountAccessibilityLabel(account))
+        .contextMenu {
+            Button("Rename") {
+                viewModel.beginRename(account)
+            }
+            if shouldOfferRepair(for: account) {
+                Button("Repair duplicate…") {
+                    Task { await viewModel.beginRepair(account) }
+                }
+            }
+        }
+        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+            Button("Rename") {
+                viewModel.beginRename(account)
+            }
+            .tint(.accentColor)
+            if shouldOfferRepair(for: account) {
+                Button("Repair") {
+                    Task { await viewModel.beginRepair(account) }
+                }
+                .tint(.orange)
+            }
+        }
+    }
+
+    func shouldOfferRepair(for account: Account) -> Bool {
+        guard account.source != .csvImport else { return false }
+        return account.providerState == .historical || viewModel.canRepairDuplicates
+    }
+
     func accountAccessibilityLabel(_ account: Account) -> String {
         let balance = CurrencyFormatting.usd(account.balance)
         switch viewModel.syncDisplay(for: account) {

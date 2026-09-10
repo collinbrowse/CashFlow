@@ -178,6 +178,25 @@ struct HomeViewModelTests {
         #expect(vm.displayState == .populated)
         #expect(vm.result.net == 0)
     }
+
+    @Test("Empty linked ledger with no successful sync kicks a sync")
+    func emptyLinkedLedgerSyncs() async {
+        let sync = CountingSyncServing(
+            connection: LinkedConnection(
+                isLinked: true,
+                providerName: "SimpleFIN",
+                lastSuccessfulSyncAt: nil
+            )
+        )
+        let vm = HomeViewModel(
+            transactionRepository: MockTransactionRepository(transactions: []),
+            syncServing: sync,
+            calculateNetCashFlow: CalculateNetCashFlowUseCase(),
+            connectivity: ConnectivityMonitor()
+        )
+        await vm.onAppear()
+        #expect(sync.syncCount == 1)
+    }
 }
 
 private struct MockTransactionRepository: TransactionRepository {
@@ -240,6 +259,24 @@ private struct MockSyncServing: SyncServing {
 
     func connectionStatus() async -> LinkedConnection {
         LinkedConnection(isLinked: true, providerName: "Mock")
+    }
+}
+
+private final class CountingSyncServing: SyncServing, @unchecked Sendable {
+    let connection: LinkedConnection
+    private(set) var syncCount = 0
+
+    init(connection: LinkedConnection) {
+        self.connection = connection
+    }
+
+    func syncNow() async throws -> LinkedConnection {
+        syncCount += 1
+        return connection
+    }
+
+    func connectionStatus() async -> LinkedConnection {
+        connection
     }
 }
 

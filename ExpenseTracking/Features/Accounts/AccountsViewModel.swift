@@ -9,6 +9,7 @@ final class AccountsViewModel {
     private let connectionLifecycle: any ConnectionLifecycleServing
     private let syncServing: any SyncServing
     private let accountRepository: any AccountRepository
+    private let accountDuplicateRepair: RepairDuplicateAccountUseCase
     private let useLargeDemoSeed: Bool
 
     var accounts: [Account] = []
@@ -25,6 +26,11 @@ final class AccountsViewModel {
     var storeEpoch: Int = 0
     var renamingAccountID: AccountID?
     var renamingName = ""
+    var repairingAccountID: AccountID?
+    var repairCandidates: [Account] = []
+    var repairPreview: DuplicateAccountRepairPreview?
+    var selectedRepairProviderID: AccountID?
+    var mergeLikelyDuplicates = false
 
     private var operationID = UUID()
     private var statusBannerDismissTask: Task<Void, Never>?
@@ -66,6 +72,9 @@ final class AccountsViewModel {
         if connection.needsReauth {
             return .issue("Reconnect required")
         }
+        if account.providerState == .historical {
+            return .issue("Not in latest sync — Repair duplicate if this was re-added")
+        }
         if let issue = account.syncIssue?.trimmingCharacters(in: .whitespacesAndNewlines),
            !issue.isEmpty
         {
@@ -78,11 +87,13 @@ final class AccountsViewModel {
         connectionLifecycle: any ConnectionLifecycleServing,
         syncServing: any SyncServing,
         accountRepository: any AccountRepository,
+        accountDuplicateRepair: RepairDuplicateAccountUseCase,
         useLargeDemoSeed: Bool
     ) {
         self.connectionLifecycle = connectionLifecycle
         self.syncServing = syncServing
         self.accountRepository = accountRepository
+        self.accountDuplicateRepair = accountDuplicateRepair
         self.useLargeDemoSeed = useLargeDemoSeed
         self.showOnboarding = !UserDefaults.standard.bool(forKey: "didCompleteOnboarding")
     }
@@ -90,6 +101,7 @@ final class AccountsViewModel {
     func onAppear() async {
         startObservingSyncProgress()
         await refreshStatus()
+        await syncEmptyLinkedLedgerIfNeeded()
     }
 
     private func startObservingSyncProgress() {
@@ -105,6 +117,14 @@ final class AccountsViewModel {
     func refreshStatus() async {
         connection = await syncServing.connectionStatus()
         accounts = (try? await accountRepository.fetchAll()) ?? []
+    }
+
+    private func syncEmptyLinkedLedgerIfNeeded() async {
+        guard connection.isLinked,
+              connection.lastSuccessfulSyncAt == nil,
+              accounts.isEmpty
+        else { return }
+        await syncNow()
     }
 
     func loadDemo(deleteLocalData: Bool = true) async {
@@ -151,6 +171,8 @@ final class AccountsViewModel {
 
     /// Set before presenting the link sheet when the user already chose keep/delete.
     var pendingLinkDeletesLocalData = true
+    /// Reuse the current Keychain namespace (reconnect). New tokens keep this false.
+    var pendingLinkPreservesNamespace = false
 
     func linkSimpleFIN() async {
         let op = beginWorking("Linking SimpleFIN…")
@@ -159,12 +181,14 @@ final class AccountsViewModel {
             workingTitle = "Linking SimpleFIN…"
             connection = try await connectionLifecycle.replaceAndLink(
                 withSetupToken: setupToken,
-                deleteLocalData: pendingLinkDeletesLocalData
+                deleteLocalData: pendingLinkDeletesLocalData,
+                preservingLinkNamespace: pendingLinkPreservesNamespace
             )
             guard isCurrent(op) else { return }
             setupToken = ""
             showLinkSheet = false
             pendingLinkDeletesLocalData = true
+            pendingLinkPreservesNamespace = false
             completeOnboarding()
             presentStatus(
                 banner(afterSync: connection, successFallback: "Account linked."),
@@ -314,6 +338,8 @@ final class AccountsViewModel {
         dismissErrorAlert()
         switch action {
         case .reconnect:
+            pendingLinkDeletesLocalData = false
+            pendingLinkPreservesNamespace = connection.isLinked
             beginLinkFlow()
         case .syncNow:
             Task { await syncNow() }
@@ -363,6 +389,96 @@ final class AccountsViewModel {
                 primaryAction: .dismissOnly
             )
         }
+    }
+
+    func beginRepair(_ account: Account) async {
+        repairingAccountID = account.id
+        selectedRepairProviderID = nil
+        repairPreview = nil
+        mergeLikelyDuplicates = false
+        do {
+            repairCandidates = try await accountDuplicateRepair.candidates(retaining: account.id)
+        } catch {
+            repairingAccountID = nil
+            errorAlert = AccountsErrorAlert(
+                title: "Couldn't start repair",
+                message: userFacingMessage(for: error, fallback: "Try Sync Now, then repair again."),
+                primaryAction: .dismissOnly
+            )
+        }
+    }
+
+    func cancelRepair() {
+        repairingAccountID = nil
+        repairCandidates = []
+        repairPreview = nil
+        selectedRepairProviderID = nil
+    }
+
+    func selectRepairProvider(_ accountID: AccountID) async {
+        selectedRepairProviderID = accountID
+        await refreshRepairPreview()
+    }
+
+    func refreshRepairPreview() async {
+        guard let retained = repairingAccountID,
+              let provider = selectedRepairProviderID
+        else {
+            repairPreview = nil
+            return
+        }
+        do {
+            repairPreview = try await accountDuplicateRepair.preview(
+                retaining: retained,
+                adoptingProviderIdentityFrom: provider,
+                mergeLikelyDuplicates: mergeLikelyDuplicates
+            )
+        } catch {
+            repairPreview = nil
+            errorAlert = AccountsErrorAlert(
+                title: "Couldn't preview repair",
+                message: userFacingMessage(for: error, fallback: "Choose a different account."),
+                primaryAction: .dismissOnly
+            )
+        }
+    }
+
+    func confirmRepair() async {
+        guard let retained = repairingAccountID,
+              let provider = selectedRepairProviderID,
+              let preview = repairPreview
+        else { return }
+        let op = beginWorking("Repairing duplicate…")
+        defer { endWorking(op) }
+        do {
+            _ = try await accountDuplicateRepair.execute(
+                DuplicateAccountRepairCommand(
+                    retainedAccountID: retained,
+                    providerAccountID: provider,
+                    expectedPreviewID: preview.id,
+                    mergeLikelyDuplicates: mergeLikelyDuplicates
+                )
+            )
+            guard isCurrent(op) else { return }
+            cancelRepair()
+            presentStatus("Duplicate accounts repaired.")
+            await refreshStatus()
+            storeEpoch += 1
+        } catch {
+            presentError(
+                title: "Couldn't repair accounts",
+                message: userFacingMessage(for: error, fallback: "Try again after Sync Now."),
+                operation: op
+            )
+        }
+    }
+
+    /// Offer repair when two bank accounts exist and at least one can donate current identity.
+    var canRepairDuplicates: Bool {
+        guard connection.isLinked else { return false }
+        let bankAccounts = accounts.filter { $0.source != .csvImport }
+        guard bankAccounts.count >= 2 else { return false }
+        return bankAccounts.contains { $0.providerState == .current }
     }
 
     @discardableResult

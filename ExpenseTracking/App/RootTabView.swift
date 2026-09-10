@@ -52,6 +52,7 @@ struct RootTabView: View {
                 connectionLifecycle: container.connectionLifecycle,
                 syncServing: container.syncServing,
                 accountRepository: container.accountRepository,
+                accountDuplicateRepair: container.accountDuplicateRepair,
                 useLargeDemoSeed: container.useLargeDemoSeed
             )
         )
