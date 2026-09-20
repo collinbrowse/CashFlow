@@ -309,18 +309,29 @@ private extension AccountsView {
                     Task { await viewModel.beginRepair(account) }
                 }
             }
+            if viewModel.canKeepLocally(account) {
+                Button("Keep locally") {
+                    Task { await viewModel.keepLocally(account) }
+                }
+            }
         }
         .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-            Button("Rename") {
-                viewModel.beginRename(account)
-            }
-            .tint(.accentColor)
             if shouldOfferRepair(for: account) {
                 Button("Repair") {
                     Task { await viewModel.beginRepair(account) }
                 }
                 .tint(.orange)
             }
+            if viewModel.canKeepLocally(account) {
+                Button("Keep locally") {
+                    Task { await viewModel.keepLocally(account) }
+                }
+                .tint(.gray)
+            }
+            Button("Rename") {
+                viewModel.beginRename(account)
+            }
+            .tint(.accentColor)
         }
     }
 
@@ -336,6 +347,8 @@ private extension AccountsView {
             return "\(account.name), \(account.institutionName), \(balance), sync OK"
         case .issue(let message):
             return "\(account.name), \(account.institutionName), \(balance), sync issue: \(message)"
+        case .quiet(let message):
+            return "\(account.name), \(account.institutionName), \(balance), \(message)"
         case .none:
             return "\(account.name), \(account.institutionName), \(balance)"
         }

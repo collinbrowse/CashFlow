@@ -214,7 +214,7 @@ enum SyncMergeEngine {
 
             if account.sourceRaw == sourceRaw, account.linkNamespace != namespace {
                 if canArchiveForeignNamespaces {
-                    account.providerState = .historical
+                    markUnseen(account)
                 }
                 continue
             }
@@ -225,8 +225,14 @@ enum SyncMergeEngine {
 
             let connID = account.providerConnectionID ?? ""
             guard authoritativeConnectionIDs.contains(connID) else { continue }
-            account.providerState = .historical
+            markUnseen(account)
         }
+    }
+
+    /// Closed / leftover accounts stay historical unless the user already kept them locally.
+    private static func markUnseen(_ account: AccountEntity) {
+        guard account.providerState != .keptLocally else { return }
+        account.providerState = .historical
     }
 
     private static func upsertTransaction(

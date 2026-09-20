@@ -72,8 +72,11 @@ final class AccountsViewModel {
         if connection.needsReauth {
             return .issue("Reconnect required")
         }
+        if account.providerState == .keptLocally {
+            return .quiet("Kept locally")
+        }
         if account.providerState == .historical {
-            return .issue("Not in latest sync — Repair duplicate if this was re-added")
+            return .issue("Swipe to repair duplicate")
         }
         if let issue = account.syncIssue?.trimmingCharacters(in: .whitespacesAndNewlines),
            !issue.isEmpty
@@ -391,6 +394,27 @@ final class AccountsViewModel {
         }
     }
 
+    func keepLocally(_ account: Account) async {
+        do {
+            try await accountRepository.keepLocally(accountID: account.id)
+            await refreshStatus()
+            storeEpoch += 1
+            presentStatus("Kept locally. It won't sync from SimpleFIN.")
+        } catch {
+            errorAlert = AccountsErrorAlert(
+                title: "Couldn't keep account locally",
+                message: userFacingMessage(for: error, fallback: "Try again after Sync Now."),
+                primaryAction: .dismissOnly
+            )
+        }
+    }
+
+    func canKeepLocally(_ account: Account) -> Bool {
+        connection.isLinked
+            && account.source != .csvImport
+            && account.providerState == .historical
+    }
+
     func beginRepair(_ account: Account) async {
         repairingAccountID = account.id
         selectedRepairProviderID = nil
@@ -560,6 +584,7 @@ enum AccountSyncDisplay: Equatable {
     case none
     case healthy
     case issue(String)
+    case quiet(String)
 }
 
 enum AccountsErrorAction: Equatable {

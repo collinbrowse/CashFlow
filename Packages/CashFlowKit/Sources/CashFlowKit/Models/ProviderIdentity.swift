@@ -114,7 +114,10 @@ public enum RemoteTransactionCompleteness: String, Hashable, Sendable, Codable {
 /// Lifecycle of a local bank-linked account relative to the current credential.
 public enum AccountProviderState: String, Hashable, Sendable, Codable {
     case current
+    /// Missing from the latest complete inventory; may be a re-added duplicate.
     case historical
+    /// Missing from the latest inventory, and the user confirmed it is not a duplicate.
+    case keptLocally
     case unknown
 }
 

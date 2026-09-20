@@ -109,6 +109,10 @@ public protocol AccountRepository: Sendable {
     /// Persists a local display name; subsequent syncs keep it while the account still matches.
     func updateName(accountID: AccountID, name: String) async throws
 
+    /// Marks a historical bank account as kept locally so it no longer warns as a possible duplicate.
+    /// Later complete inventories leave this state alone until the provider returns the account again.
+    func keepLocally(accountID: AccountID) async throws
+
     /// Creates a local (CSV / manual) account. `externalID` is namespaced by the implementation.
     func create(
         name: String,

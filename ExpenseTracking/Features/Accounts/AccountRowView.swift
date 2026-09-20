@@ -40,6 +40,9 @@ struct AccountRowView: View {
         case .issue:
             Image(systemName: "exclamationmark.triangle.fill")
                 .foregroundStyle(Theme.warning)
+        case .quiet:
+            Image(systemName: "archivebox.fill")
+                .foregroundStyle(Theme.muted)
         case .none:
             Image(systemName: "circle")
                 .foregroundStyle(Theme.muted)
@@ -57,6 +60,11 @@ struct AccountRowView: View {
             Text(message)
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(Theme.warning)
+                .fixedSize(horizontal: false, vertical: true)
+        case .quiet(let message):
+            Text(message)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(Theme.muted)
                 .fixedSize(horizontal: false, vertical: true)
         case .none:
             EmptyView()

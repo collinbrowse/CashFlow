@@ -676,6 +676,188 @@ struct SyncMergeEngineIdentityTests {
         #expect(current?.providerState == .current)
     }
 
+    @Test("Kept-locally accounts stay kept across a later complete inventory")
+    func keptLocallySurvivesLaterSync() throws {
+        let container = try ModelContainerFactory.make(inMemory: true)
+        let context = ModelContext(container)
+        let link = ProviderLinkIdentity(source: .simpleFIN, linkNamespace: "ns")
+        try SyncMergeEngine.merge(
+            payload: RemoteSyncPayload(
+                source: link,
+                accounts: [
+                    RemoteAccountSnapshot(
+                        identity: RemoteAccountIdentity(link: link, connectionID: "c1", accountID: "old"),
+                        name: "Checking",
+                        institutionName: "Bank",
+                        currencyCode: "USD",
+                        balance: 1,
+                        balanceDate: .now,
+                        transactions: []
+                    ),
+                ],
+                inventoryCompleteness: .complete
+            ),
+            into: context
+        )
+        try SyncMergeEngine.merge(
+            payload: RemoteSyncPayload(
+                source: link,
+                accounts: [
+                    RemoteAccountSnapshot(
+                        identity: RemoteAccountIdentity(link: link, connectionID: "c1", accountID: "new"),
+                        name: "Checking",
+                        institutionName: "Bank",
+                        currencyCode: "USD",
+                        balance: 2,
+                        balanceDate: .now,
+                        transactions: []
+                    ),
+                ],
+                inventoryCompleteness: .complete
+            ),
+            into: context
+        )
+        let historical = try #require(
+            try context.fetch(FetchDescriptor<AccountEntity>()).first { $0.providerAccountID == "old" }
+        )
+        historical.providerState = .keptLocally
+        try context.save()
+
+        try SyncMergeEngine.merge(
+            payload: RemoteSyncPayload(
+                source: link,
+                accounts: [
+                    RemoteAccountSnapshot(
+                        identity: RemoteAccountIdentity(link: link, connectionID: "c1", accountID: "new"),
+                        name: "Checking",
+                        institutionName: "Bank",
+                        currencyCode: "USD",
+                        balance: 3,
+                        balanceDate: .now,
+                        transactions: []
+                    ),
+                ],
+                inventoryCompleteness: .complete
+            ),
+            into: context
+        )
+        let kept = try #require(
+            try context.fetch(FetchDescriptor<AccountEntity>()).first { $0.providerAccountID == "old" }
+        )
+        #expect(kept.providerState == .keptLocally)
+    }
+
+    @Test("Provider returning a kept-locally account makes it current again")
+    func keptLocallyRevivesWhenProviderReturnsIt() throws {
+        let container = try ModelContainerFactory.make(inMemory: true)
+        let context = ModelContext(container)
+        let link = ProviderLinkIdentity(source: .simpleFIN, linkNamespace: "ns")
+        let identity = RemoteAccountIdentity(link: link, connectionID: "c1", accountID: "a1")
+        try SyncMergeEngine.merge(
+            payload: RemoteSyncPayload(
+                source: link,
+                accounts: [
+                    RemoteAccountSnapshot(
+                        identity: identity,
+                        name: "Checking",
+                        institutionName: "Bank",
+                        currencyCode: "USD",
+                        balance: 1,
+                        balanceDate: .now,
+                        transactions: []
+                    ),
+                ],
+                inventoryCompleteness: .complete
+            ),
+            into: context
+        )
+        let local = try #require(try context.fetch(FetchDescriptor<AccountEntity>()).first)
+        local.providerState = .keptLocally
+        try context.save()
+
+        try SyncMergeEngine.merge(
+            payload: RemoteSyncPayload(
+                source: link,
+                accounts: [
+                    RemoteAccountSnapshot(
+                        identity: identity,
+                        name: "Checking",
+                        institutionName: "Bank",
+                        currencyCode: "USD",
+                        balance: 9,
+                        balanceDate: .now,
+                        transactions: []
+                    ),
+                ],
+                inventoryCompleteness: .complete
+            ),
+            into: context
+        )
+        let revived = try #require(try context.fetch(FetchDescriptor<AccountEntity>()).first)
+        #expect(revived.providerState == .current)
+        #expect(revived.balance == 9)
+    }
+
+    @Test("Keep locally rejects current accounts and persists historical ones")
+    func keepLocallyPersistsOnlyHistorical() async throws {
+        let container = try ModelContainerFactory.make(inMemory: true)
+        let context = ModelContext(container)
+        let historicalKey = ProviderIdentityEncoding.accountKey(
+            source: .simpleFIN,
+            linkNamespace: "ns",
+            connectionID: "c1",
+            accountID: "old"
+        )
+        let currentKey = ProviderIdentityEncoding.accountKey(
+            source: .simpleFIN,
+            linkNamespace: "ns",
+            connectionID: "c1",
+            accountID: "new"
+        )
+        context.insert(
+            AccountEntity(
+                id: "hist",
+                identityKey: historicalKey,
+                source: .simpleFIN,
+                linkNamespace: "ns",
+                providerConnectionID: "c1",
+                providerAccountID: "old",
+                name: "Checking",
+                institutionName: "Bank",
+                currencyCode: "USD",
+                balance: 1,
+                balanceDate: .now,
+                providerState: .historical
+            )
+        )
+        context.insert(
+            AccountEntity(
+                id: "cur",
+                identityKey: currentKey,
+                source: .simpleFIN,
+                linkNamespace: "ns",
+                providerConnectionID: "c1",
+                providerAccountID: "new",
+                name: "Checking",
+                institutionName: "Bank",
+                currencyCode: "USD",
+                balance: 2,
+                balanceDate: .now,
+                providerState: .current
+            )
+        )
+        try context.save()
+
+        let repo = SwiftDataAccountRepository(modelContainer: container)
+        try await repo.keepLocally(accountID: AccountID("hist"))
+        let kept = try await repo.fetchAll().first { $0.id.rawValue == "hist" }
+        #expect(kept?.providerState == .keptLocally)
+
+        await #expect(throws: CashFlowError.self) {
+            try await repo.keepLocally(accountID: AccountID("cur"))
+        }
+    }
+
     @Test("One failing connection does not archive another connection's inventory")
     func perConnectionArchive() throws {
         let container = try ModelContainerFactory.make(inMemory: true)

@@ -12,7 +12,7 @@ struct DuplicateAccountRepairSheet: View {
                         Text(retained.name)
                         Text(retained.institutionName)
                             .foregroundStyle(.secondary)
-                        if retained.providerState == .historical {
+                        if retained.providerState == .historical || retained.providerState == .keptLocally {
                             Text("Marked historical after the provider stopped returning it.")
                                 .font(.footnote)
                                 .foregroundStyle(.secondary)
