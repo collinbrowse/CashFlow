@@ -19,6 +19,7 @@ public final class BackgroundEnrichmentScheduler: BackgroundEnrichmentScheduling
     private let progressHub: EnrichmentProgressHub
     private let workCoordinator: FoundationModelsWorkCoordinator
     private let logger = Logger(subsystem: "com.expensetracking", category: "bg-enrichment")
+    private let userDrain = UserDrainSession()
 
     public init(
         enrichment: any TransactionEnrichmentRunning,
@@ -61,57 +62,66 @@ public final class BackgroundEnrichmentScheduler: BackgroundEnrichmentScheduling
         expectedTotal: Int,
         onProgress: (@Sendable (_ completed: Int, _ total: Int) -> Void)?
     ) async -> EnrichmentDrainOutcome {
-        let initialTotal = max(expectedTotal, 0)
-        let snapshot = DrainProgressSnapshot(completed: 0, total: initialTotal)
+        let outcome = await userDrain.run { [progressHub, enrichment] shouldContinue in
+            let initialTotal = max(expectedTotal, 0)
+            let snapshot = DrainProgressSnapshot(completed: 0, total: initialTotal)
 
-        progressHub.emit(
-            EnrichmentProgress(
-                isRunning: true,
-                phase: .running,
-                completed: 0,
-                total: initialTotal
+            progressHub.emit(
+                EnrichmentProgress(
+                    isRunning: true,
+                    phase: .running,
+                    completed: 0,
+                    total: initialTotal
+                )
             )
-        )
 
-        // Foreground drains ignore BG task expiration — they must not share a continue
-        // flag with `BGContinuedProcessingTask` (that caused vibrate → instant pause).
-        let outcome = await enrichment.drainAllNeedingEnrichment(
-            shouldContinue: { true },
-            onProgress: { [progressHub] completed, total in
-                let resolvedTotal = max(total, initialTotal, completed)
-                let phase = snapshot.updateCounts(completed: completed, total: resolvedTotal)
-                progressHub.emit(
-                    EnrichmentProgress(
-                        isRunning: true,
-                        phase: phase.phase,
-                        completed: completed,
-                        total: resolvedTotal,
-                        detail: phase.detail
+            // Cooperative `shouldContinue` is owned here so Settings Stop can cancel.
+            // Foreground drains must not share a flag with `BGContinuedProcessingTask`
+            // (that caused vibrate → instant pause).
+            let outcome = await enrichment.drainAllNeedingEnrichment(
+                shouldContinue: shouldContinue,
+                onProgress: { [progressHub] completed, total in
+                    let resolvedTotal = max(total, initialTotal, completed)
+                    let phase = snapshot.updateCounts(completed: completed, total: resolvedTotal)
+                    progressHub.emit(
+                        EnrichmentProgress(
+                            isRunning: true,
+                            phase: phase.phase,
+                            completed: completed,
+                            total: resolvedTotal,
+                            detail: phase.detail
+                        )
                     )
-                )
-                onProgress?(completed, resolvedTotal)
-            },
-            onPhase: { [progressHub] phase, detail in
-                let counts = snapshot.updatePhase(phase, detail: detail)
-                progressHub.emit(
-                    EnrichmentProgress(
-                        isRunning: true,
-                        phase: phase,
-                        completed: counts.completed,
-                        total: max(counts.total, initialTotal, 1),
-                        detail: detail
+                    onProgress?(completed, resolvedTotal)
+                },
+                onPhase: { [progressHub] phase, detail in
+                    let counts = snapshot.updatePhase(phase, detail: detail)
+                    progressHub.emit(
+                        EnrichmentProgress(
+                            isRunning: true,
+                            phase: phase,
+                            completed: counts.completed,
+                            total: max(counts.total, initialTotal, 1),
+                            detail: detail
+                        )
                     )
-                )
-            }
-        )
+                }
+            )
 
-        progressHub.emit(nil)
+            progressHub.emit(snapshot.terminalProgress(outcome: outcome, initialTotal: initialTotal))
+            progressHub.emit(nil)
+            return outcome
+        }
         if outcome.wasRateLimited {
             scheduleUnattendedContinuationSoon()
         } else {
             scheduleUnattendedContinuation()
         }
         return outcome
+    }
+
+    public func stopFullEnrichmentDrain() async {
+        await userDrain.stop()
     }
 
     public func scheduleUnattendedContinuation() {
@@ -136,7 +146,14 @@ public final class BackgroundEnrichmentScheduler: BackgroundEnrichmentScheduling
     }
 
     public var isFullDrainRunning: Bool {
-        get async { await enrichment.isFullDrainRunning }
+        get async {
+            if await userDrain.hasInFlight { return true }
+            return await enrichment.isFullDrainRunning
+        }
+    }
+
+    public func hasRemainingCleanupWork() async -> Bool {
+        await sync.historyImportStatus()?.needsCleanup == true
     }
 
     #if canImport(BackgroundTasks) && os(iOS)
@@ -199,6 +216,60 @@ private final class TaskCompletionBox: @unchecked Sendable {
 }
 #endif
 
+/// Serializes user start / stop / resume.
+///
+/// - Start while a live drain is running: join it (reattach after a UI desync).
+/// - Start while a drain is stopping: wait for it, then start a new pass.
+/// - Stop: flip the cooperative flag and wait until the current pass exits.
+private actor UserDrainSession {
+    private let continueFlag = OSAllocatedUnfairLock(initialState: true)
+    private var inFlight: Task<EnrichmentDrainOutcome, Never>?
+
+    var hasInFlight: Bool { inFlight != nil }
+
+    func run(
+        _ work: @escaping @Sendable (
+            _ shouldContinue: @escaping @Sendable () -> Bool
+        ) async -> EnrichmentDrainOutcome
+    ) async -> EnrichmentDrainOutcome {
+        while true {
+            if let current = inFlight {
+                let joiningLive = continueFlag.withLock { $0 }
+                let outcome = await current.value
+                if joiningLive {
+                    return outcome
+                }
+                // Owner of the stopping pass still has to nil `inFlight`. Yield so
+                // we don't spin on the completed task.
+                while inFlight != nil {
+                    await Task.yield()
+                }
+                continue
+            }
+
+            continueFlag.withLock { $0 = true }
+            let flag = continueFlag
+            let shouldContinue: @Sendable () -> Bool = {
+                flag.withLock { $0 }
+            }
+            let task = Task {
+                await work(shouldContinue)
+            }
+            inFlight = task
+            let outcome = await task.value
+            inFlight = nil
+            return outcome
+        }
+    }
+
+    func stop() async {
+        continueFlag.withLock { $0 = false }
+        if let inFlight {
+            _ = await inFlight.value
+        }
+    }
+}
+
 private final class DrainProgressSnapshot: @unchecked Sendable {
     private struct State {
         var completed: Int
@@ -238,6 +309,35 @@ private final class DrainProgressSnapshot: @unchecked Sendable {
             $0.phase = phase
             $0.detail = detail
             return ($0.completed, $0.total)
+        }
+    }
+
+    func terminalProgress(
+        outcome: EnrichmentDrainOutcome,
+        initialTotal: Int
+    ) -> EnrichmentProgress {
+        lock.withLock {
+            let total = max($0.total, $0.completed, initialTotal)
+            switch outcome {
+            case .completed:
+                let doneTotal = max(total, 1)
+                return EnrichmentProgress(
+                    isRunning: false,
+                    phase: .running,
+                    completed: doneTotal,
+                    total: doneTotal,
+                    outcome: .completed
+                )
+            case .interrupted, .interruptedByRateLimit:
+                return EnrichmentProgress(
+                    isRunning: false,
+                    phase: $0.phase,
+                    completed: $0.completed,
+                    total: max(total, 1),
+                    detail: $0.detail,
+                    outcome: outcome
+                )
+            }
         }
     }
 }

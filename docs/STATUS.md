@@ -96,8 +96,9 @@ Code: `Packages/CashFlowData/`
 - Home reload and successful sync call `WidgetCenter.reloadTimelines` so each widget instance recomputes **its own** configured range (not Home’s selected range)
 - UI: one-line scaled signed net; green `+$` income row and red `−$` expense row (no `In · Out` bullet line)
 - Uses `AppIntentConfiguration` (`CashFlowWidgetConfigurationIntent`)
+- **Live Activity** for on-device title cleanup: AirDrop-style circular progress on the Dynamic Island and Lock Screen while a user-started drain runs (Settings / first-sync prompt). Local updates only; overnight `BGProcessingTask` does not start a new activity
 
-Code: `ExpenseTrackingWidget/`, `Packages/CashFlowData` (`WidgetNetCashFlowLoader`), `Packages/CashFlowKit` (`WidgetCashFlowTimeFrame`)
+Code: `ExpenseTrackingWidget/`, `Shared/LiveActivities/`, `ExpenseTracking/App/TitleCleanupLiveActivityPresenter.swift`, `Packages/CashFlowData` (`WidgetNetCashFlowLoader`), `Packages/CashFlowKit` (`WidgetCashFlowTimeFrame`, `TitleCleanupLiveActivityMachine`)
 
 ### Quality gates
 
@@ -152,6 +153,7 @@ Code: `CashFlowKit` (rules + resolve), `CashFlowData` (persist + reapply + merge
 - **Rule Undo**: Edit Rule sheet can undo the last apply for assistant and user rules; later manual edits win
 - When Apple Intelligence is off / ineligible / not ready, titles stay raw until the user renames via rules or the editor; categories still get keyword fallback
 - Configurable history lookback (90 days / 1 / 2 / 5 years) with quota-aware multi-day backfill; Settings shows progress and “Clean up transactions”
+- User-started cleanup also presents an AirDrop-style Live Activity (circular ring, counts + phase; no merchant names or amounts)
 
 Code: `CashFlowKit` ports + plan DTOs, `CashFlowData/Intelligence/`, `ExpenseTracking/Features/Assistant/`
 

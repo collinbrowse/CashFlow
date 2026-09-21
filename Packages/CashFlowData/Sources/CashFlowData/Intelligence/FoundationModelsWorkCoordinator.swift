@@ -143,10 +143,13 @@ public actor FoundationModelsWorkCoordinator {
     /// Waits out a rate-limit pause. Returns `false` when there was nothing to wait for.
     /// Sleeps in slices so callers observe an early `clearRateLimitPause()`; a cancelled
     /// `Task.sleep` returns immediately, so bail out instead of spinning on the clock.
+    /// `shouldContinue` becoming false also returns promptly so Stop isn't stuck on the pause.
     @discardableResult
-    public func waitOutRateLimitPauseIfNeeded() async -> Bool {
+    public func waitOutRateLimitPauseIfNeeded(
+        shouldContinue: @escaping @Sendable () -> Bool = { true }
+    ) async -> Bool {
         guard isRateLimitPaused else { return false }
-        while isRateLimitPaused {
+        while isRateLimitPaused, shouldContinue() {
             let remaining = rateLimitPauseRemaining
             guard remaining > 0 else { break }
             let slice = min(remaining, 1.0)
@@ -160,9 +163,11 @@ public actor FoundationModelsWorkCoordinator {
     }
 
     /// Call before each model invocation (after memo miss).
-    public func paceBeforeModelRequest() async {
-        await waitOutRateLimitPauseIfNeeded()
-        guard !Task.isCancelled else { return }
+    public func paceBeforeModelRequest(
+        shouldContinue: @escaping @Sendable () -> Bool = { true }
+    ) async {
+        await waitOutRateLimitPauseIfNeeded(shouldContinue: shouldContinue)
+        guard shouldContinue(), !Task.isCancelled else { return }
         try? await Task.sleep(nanoseconds: adaptivePaceNanoseconds)
     }
 

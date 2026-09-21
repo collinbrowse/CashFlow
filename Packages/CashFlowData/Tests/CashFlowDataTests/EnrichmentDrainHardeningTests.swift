@@ -1,4 +1,5 @@
 import Foundation
+import os
 import SwiftData
 import Testing
 import CashFlowKit
@@ -67,9 +68,128 @@ struct EnrichmentDrainHardeningTests {
             )
         }
         _ = await incremental.value
-        _ = await full.value
+        let fullOutcome = await full.value
 
         #expect(await enricher.maxConcurrent == 1)
+        #expect(fullOutcome == .completed)
+        #expect((try? await txs.countNeedingEnrichment()) == 0)
+    }
+
+    @Test("Stopping a full drain then resuming processes remaining rows")
+    func stopThenResumeDrainsRemaining() async {
+        let enricher = GatedEnricher()
+        let txs = StuckSkipRepository(
+            needing: (1...4).map { Self.transaction(id: "\($0)", description: "MERCHANT \($0)") },
+            failSkips: false
+        )
+        let coordinator = TransactionEnrichmentCoordinator(
+            availability: DrainAvailability(.available),
+            descriptionEnricher: enricher,
+            categoryEnricher: NoCategoryEnricher(),
+            transactionRepository: txs,
+            accountRepository: EmptyAccountRepository(),
+            ruleRepository: NoRuleRepository(),
+            workCoordinator: FoundationModelsWorkCoordinator()
+        )
+        let continueFlag = OSAllocatedUnfairLock(initialState: true)
+
+        let first = Task {
+            await coordinator.drainAllNeedingEnrichment(
+                shouldContinue: { continueFlag.withLock { $0 } },
+                onProgress: nil
+            )
+        }
+        await enricher.waitForFirstCall()
+        continueFlag.withLock { $0 = false }
+        await enricher.allowCurrentCall()
+        let firstOutcome = await first.value
+        #expect(firstOutcome == .interrupted)
+        let processedBeforeResume = await enricher.callCount
+        #expect(processedBeforeResume >= 1)
+        #expect((try? await txs.countNeedingEnrichment()) ?? 0 > 0)
+
+        continueFlag.withLock { $0 = true }
+        await enricher.stopBlocking()
+        let second = await coordinator.drainAllNeedingEnrichment(
+            shouldContinue: { continueFlag.withLock { $0 } },
+            onProgress: nil
+        )
+        #expect(second == .completed)
+        #expect((try? await txs.countNeedingEnrichment()) == 0)
+    }
+
+    @Test("A second full drain waits for the first instead of returning interrupted")
+    func overlappingFullDrainsBothCompleteWork() async {
+        let enricher = ConcurrencyTrackingEnricher()
+        let txs = StuckSkipRepository(
+            needing: (1...6).map { Self.transaction(id: "\($0)", description: "MERCHANT \($0)") },
+            failSkips: false
+        )
+        let coordinator = TransactionEnrichmentCoordinator(
+            availability: DrainAvailability(.available),
+            descriptionEnricher: enricher,
+            categoryEnricher: NoCategoryEnricher(),
+            transactionRepository: txs,
+            accountRepository: EmptyAccountRepository(),
+            ruleRepository: NoRuleRepository(),
+            workCoordinator: FoundationModelsWorkCoordinator()
+        )
+
+        let first = Task {
+            await coordinator.drainAllNeedingEnrichment(
+                shouldContinue: { true },
+                onProgress: nil
+            )
+        }
+        try? await Task.sleep(nanoseconds: 10_000_000)
+        let second = await coordinator.drainAllNeedingEnrichment(
+            shouldContinue: { true },
+            onProgress: nil
+        )
+        let firstOutcome = await first.value
+        #expect(firstOutcome == .completed)
+        #expect(second == .completed)
+        #expect(await enricher.maxConcurrent == 1)
+        #expect((try? await txs.countNeedingEnrichment()) == 0)
+    }
+
+    @Test("Category pass stops when shouldContinue becomes false")
+    func categoryPassHonorsStop() async {
+        let continueFlag = OSAllocatedUnfairLock(initialState: true)
+        let enricher = GatedCategoryEnricher()
+        let txs = StuckSkipRepository(
+            needing: [],
+            failSkips: false,
+            undefined: (1...6).map {
+                Self.transaction(
+                    id: "c\($0)",
+                    description: "STORE \($0)",
+                    categoryID: SystemCategory.undefined.id
+                )
+            }
+        )
+        let coordinator = TransactionEnrichmentCoordinator(
+            availability: DrainAvailability(.available),
+            descriptionEnricher: FixedEnricher(title: "Merchant"),
+            categoryEnricher: enricher,
+            transactionRepository: txs,
+            accountRepository: EmptyAccountRepository(),
+            ruleRepository: NoRuleRepository(),
+            workCoordinator: FoundationModelsWorkCoordinator()
+        )
+
+        let drain = Task {
+            await coordinator.drainAllNeedingEnrichment(
+                shouldContinue: { continueFlag.withLock { $0 } },
+                onProgress: nil
+            )
+        }
+        await enricher.waitForFirstCall()
+        continueFlag.withLock { $0 = false }
+        await enricher.allowCurrentCall()
+        let outcome = await drain.value
+        #expect(outcome == .interrupted)
+        #expect((try? await txs.countNeedingCategorySuggestion()) ?? 0 > 0)
     }
 
     @Test("Backlog is counted per batch, not per row")
@@ -104,7 +224,11 @@ struct EnrichmentDrainHardeningTests {
         #expect(totals.values.allSatisfy { $0 == rowCount })
     }
 
-    private static func transaction(id: String, description: String) -> Transaction {
+    private static func transaction(
+        id: String,
+        description: String,
+        categoryID: CategoryID = SystemCategory.other.id
+    ) -> Transaction {
         Transaction(
             id: TransactionID(id),
             accountID: AccountID("a"),
@@ -112,7 +236,7 @@ struct EnrichmentDrainHardeningTests {
             amount: -9,
             postedDate: .now,
             description: description,
-            categoryID: SystemCategory.other.id
+            categoryID: categoryID
         )
     }
 }
@@ -176,6 +300,27 @@ struct FoundationModelsPacingTests {
         _ = await task.value
 
         // The pause itself is 45s; a cancelled wait must not burn the clock down.
+        #expect(Date().timeIntervalSince(started) < 5)
+        #expect(await coordinator.isRateLimitPaused)
+    }
+
+    @Test("Waiting out a rate limit returns promptly once shouldContinue is false")
+    func rateLimitWaitHonorsStop() async {
+        let coordinator = FoundationModelsWorkCoordinator()
+        await coordinator.noteRateLimited()
+        #expect(await coordinator.isRateLimitPaused)
+
+        let continueFlag = OSAllocatedUnfairLock(initialState: true)
+        let started = Date()
+        let task = Task {
+            await coordinator.waitOutRateLimitPauseIfNeeded(
+                shouldContinue: { continueFlag.withLock { $0 } }
+            )
+        }
+        try? await Task.sleep(nanoseconds: 20_000_000)
+        continueFlag.withLock { $0 = false }
+        _ = await task.value
+
         #expect(Date().timeIntervalSince(started) < 5)
         #expect(await coordinator.isRateLimitPaused)
     }
@@ -272,6 +417,61 @@ private actor CountingEmptyEnricher: TransactionDescriptionEnriching {
     }
 }
 
+private actor GatedEnricher: TransactionDescriptionEnriching {
+    private let started = AsyncSemaphore()
+    private let proceed = AsyncSemaphore()
+    private var blockFurther = true
+    private(set) var callCount = 0
+
+    func waitForFirstCall() async {
+        await started.wait()
+    }
+
+    func allowCurrentCall() {
+        proceed.signal()
+    }
+
+    func stopBlocking() {
+        blockFurther = false
+        proceed.signal()
+    }
+
+    func enrich(rawDescription: String) async -> ParsedTransactionDescription {
+        callCount += 1
+        if callCount == 1 {
+            started.signal()
+            await proceed.wait()
+        } else if blockFurther {
+            await proceed.wait()
+        }
+        return ParsedTransactionDescription(title: "Merchant", location: nil, raw: rawDescription)
+    }
+}
+
+private actor GatedCategoryEnricher: TransactionCategoryEnriching {
+    private let started = AsyncSemaphore()
+    private let proceed = AsyncSemaphore()
+    private(set) var callCount = 0
+
+    func waitForFirstCall() async {
+        await started.wait()
+    }
+
+    func allowCurrentCall() {
+        proceed.signal()
+    }
+
+    func suggestCategory(_ request: CategorySuggestionRequest) async -> CategoryID? {
+        _ = request
+        callCount += 1
+        if callCount == 1 {
+            started.signal()
+            await proceed.wait()
+        }
+        return SystemCategory.dining.id
+    }
+}
+
 private actor ConcurrencyTrackingEnricher: TransactionDescriptionEnriching {
     private var active = 0
     private(set) var maxConcurrent = 0
@@ -316,13 +516,15 @@ private struct NoRuleRepository: CategorizationRuleRepository {
 /// Repository whose `markEnrichmentSkipped` fails, leaving the row in the backlog.
 private actor StuckSkipRepository: TransactionRepository {
     private var needing: [Transaction]
+    private var undefined: [Transaction]
     private let failSkips: Bool
     private(set) var skipAttempts = 0
     private(set) var countCalls = 0
 
-    init(needing: [Transaction], failSkips: Bool = true) {
+    init(needing: [Transaction], failSkips: Bool = true, undefined: [Transaction] = []) {
         self.needing = needing
         self.failSkips = failSkips
+        self.undefined = undefined
     }
 
     func fetchPage(
@@ -341,7 +543,10 @@ private actor StuckSkipRepository: TransactionRepository {
         categoryLocked: Bool
     ) async throws {}
     func updateTags(transactionID: TransactionID, tagIDs: [TagID]) async throws {}
-    func applyCategoryAssignments(_ assignments: [CategoryAssignment]) async throws {}
+    func applyCategoryAssignments(_ assignments: [CategoryAssignment]) async throws {
+        let assigned = Set(assignments.map(\.transactionID))
+        undefined.removeAll { assigned.contains($0.id) }
+    }
     func applyTagAssignments(_ assignments: [TagAssignment]) async throws {}
     func applyTitleLocationAssignments(_ assignments: [TitleLocationAssignment]) async throws {}
 
@@ -364,8 +569,10 @@ private actor StuckSkipRepository: TransactionRepository {
     }
 
     func fetchAllForCategorization() async throws -> [Transaction] { [] }
-    func fetchNeedingCategorySuggestion(limit: Int) async throws -> [Transaction] { [] }
-    func countNeedingCategorySuggestion() async throws -> Int { 0 }
+    func fetchNeedingCategorySuggestion(limit: Int) async throws -> [Transaction] {
+        Array(undefined.prefix(limit))
+    }
+    func countNeedingCategorySuggestion() async throws -> Int { undefined.count }
 
     func countNeedingEnrichment() async throws -> Int {
         countCalls += 1

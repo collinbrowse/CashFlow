@@ -31,6 +31,7 @@ final class DependencyContainer {
     let localDataExport: any LocalDataExporting
     let csvImport: any CSVImporting
     let widgetTimelineReloader: any WidgetTimelineReloading
+    let titleCleanupLiveActivity: TitleCleanupLiveActivityPresenter
     let accountDuplicateRepair: RepairDuplicateAccountUseCase
     let useLargeDemoSeed: Bool
 
@@ -172,6 +173,10 @@ final class DependencyContainer {
             workCoordinator: workCoordinator
         )
         self.backgroundEnrichment = background
+        self.titleCleanupLiveActivity = TitleCleanupLiveActivityPresenter(
+            enabled: !uiTesting,
+            backgroundEnrichment: background
+        )
         self.localDataExport = LocalCSVExporter(modelContainer: modelContainer)
         self.csvImport = LocalCSVImporter(
             modelContainer: modelContainer,

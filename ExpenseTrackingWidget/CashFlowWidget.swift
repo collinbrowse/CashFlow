@@ -191,5 +191,6 @@ struct OpenCashFlowIntent: AppIntent {
 struct CashFlowWidgetBundle: WidgetBundle {
     var body: some Widget {
         CashFlowWidget()
+        TitleCleanupLiveActivity()
     }
 }

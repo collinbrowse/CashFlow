@@ -13,7 +13,7 @@ Clean Architecture (layered) + **MVVM** at the UI edge. Swift 6 strict concurren
 | **CashFlowKit** | `Packages/CashFlowKit` | Domain models, use cases, ports. **Foundation only.** |
 | **CashFlowData** | `Packages/CashFlowData` | SwiftData, URLSession / SimpleFIN, Keychain, Demo provider, SyncCoordinator, WidgetNetCashFlowLoader. |
 | **ExpenseTracking** | `ExpenseTracking/` | SwiftUI features, DesignSystem, composition root (`DependencyContainer`). |
-| **ExpenseTrackingWidget** | `ExpenseTrackingWidget/` | WidgetKit extension; live App Group SwiftData via `WidgetNetCashFlowLoader`. |
+| **ExpenseTrackingWidget** | `ExpenseTrackingWidget/` | WidgetKit extension; live App Group SwiftData via `WidgetNetCashFlowLoader`; title-cleanup Live Activity UI |
 
 Dependency direction:
 
@@ -26,9 +26,9 @@ Features call **ports / use cases**. Only `ExpenseTracking/App/DependencyContain
 
 ### CashFlowKit (domain)
 
-- Models: `Transaction`, `Account`, `Category` / `SystemCategory`, `CashFlowDateRange`, `WidgetCashFlowTimeFrame`, filters, errors
+- Models: `Transaction`, `Account`, `Category` / `SystemCategory`, `CashFlowDateRange`, `WidgetCashFlowTimeFrame`, filters, errors, `TitleCleanupLiveActivityContent`
 - Ports: `TransactionRepository`, `BankLinkingServing`, `SyncServing`, `WidgetTimelineReloading`, …
-- Use cases: `CalculateNetCashFlowUseCase`, `CashFlowContribution`, `MergeSyncPolicy`, `CashFlowCurrencyFormatting`
+- Use cases: `CalculateNetCashFlowUseCase`, `CashFlowContribution`, `MergeSyncPolicy`, `CashFlowCurrencyFormatting`, `TitleCleanupLiveActivityMachine`
 
 Money amounts are `Decimal` end-to-end in domain/data/UI models. Charts may convert to `Double` at the plot edge only.
 
@@ -52,7 +52,7 @@ Money amounts are `Decimal` end-to-end in domain/data/UI models. Charts may conv
 | `Features/Settings` | About + privacy + export + app lock + cleanup |
 | `Features/AppLock` | Lock gate overlay, privacy cover, Face ID / passcode unlock |
 | `DesignSystem` | Shared theme / formatting helpers |
-| `App` | Entry, tabs, `AppRouter`, `DependencyContainer` |
+| `App` | Entry, tabs, `AppRouter`, `DependencyContainer`, `TitleCleanupLiveActivityPresenter` |
 
 ## Navigation
 
@@ -77,6 +77,10 @@ Implemented only in `CalculateNetCashFlowUseCase` / `CashFlowContribution`:
 
 `SyncCoordinator` is single-flight (overlapping syncs coalesce / cancel appropriately).
 
+## Title-cleanup Live Activity
+
+User-initiated full drains emit `EnrichmentProgress` on `EnrichmentProgressHub`, including a terminal snapshot with `outcome` when the drain stops. `TitleCleanupLiveActivityPresenter` (app target; constructed in `DependencyContainer`) maps that through `TitleCleanupLiveActivityMachine` (Kit) into ActivityKit. A `.completed` outcome ends Done even if the last in-flight counts lagged; leftover activities on launch complete when the backlog is empty instead of freezing as Paused. Lock Screen / Dynamic Island views live in `ExpenseTrackingWidget`. `TitleCleanupActivityAttributes` is a shared file compiled into both the app and the widget.
+
 ## Transactions performance
 
 - Keyset pagination (page size **50**)
@@ -92,4 +96,4 @@ Implemented only in `CalculateNetCashFlowUseCase` / `CashFlowContribution`:
 
 ## Enforcement
 
-`scripts/check_architecture.sh` (also CI) fails on illegal imports — e.g. Kit using SwiftUI/SwiftData, Features using `ModelContext` / SimpleFIN DTOs / ad-hoc `URLSession`, or Features constructing `SimpleFINBankLinkingService`.
+`scripts/check_architecture.sh` (also CI) fails on illegal imports — e.g. Kit using SwiftUI/SwiftData/ActivityKit, Features using `ModelContext` / SimpleFIN DTOs / ad-hoc `URLSession` / ActivityKit, CashFlowData using ActivityKit, or Features constructing `SimpleFINBankLinkingService`.

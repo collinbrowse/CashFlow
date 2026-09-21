@@ -6,8 +6,8 @@ public protocol BackgroundEnrichmentScheduling: Sendable {
     func registerHandlers()
 
     /// Runs a full-history title cleanup now. Call only in response to a user tap.
-    /// Publishes live progress via `enrichmentProgressUpdates()` and mirrors it to the
-    /// system continued-processing Live Activity when the user leaves the app.
+    /// Publishes live progress via `enrichmentProgressUpdates()` for Settings and an
+    /// AirDrop-style Live Activity (Dynamic Island and Lock Screen).
     @discardableResult
     func runFullEnrichmentDrain(
         expectedTotal: Int,
@@ -27,8 +27,17 @@ public protocol BackgroundEnrichmentScheduling: Sendable {
     /// Whether a full drain is currently running.
     var isFullDrainRunning: Bool { get async }
 
+    /// Cooperative stop for a user-initiated drain. No-op when idle.
+    /// The in-flight `runFullEnrichmentDrain` returns `.interrupted` once the current
+    /// row finishes. Resume is a new `runFullEnrichmentDrain` after this returns.
+    func stopFullEnrichmentDrain() async
+
     /// Live cleanup progress for Settings / tab badge. Yields `nil` when idle.
     func enrichmentProgressUpdates() -> AsyncStream<EnrichmentProgress?>
+
+    /// Untitled or undefined rows still waiting. Leftover Live Activities use this to
+    /// choose Done vs Paused when the process missed the drain's terminal snapshot.
+    func hasRemainingCleanupWork() async -> Bool
 }
 
 extension BackgroundEnrichmentScheduling {
@@ -45,12 +54,16 @@ extension BackgroundEnrichmentScheduling {
         _ = isForeground
     }
 
+    public func stopFullEnrichmentDrain() async {}
+
     public func enrichmentProgressUpdates() -> AsyncStream<EnrichmentProgress?> {
         AsyncStream { continuation in
             continuation.yield(nil)
             continuation.finish()
         }
     }
+
+    public func hasRemainingCleanupWork() async -> Bool { false }
 }
 
 /// Work estimate shown after a large first sync before starting enrichment.
