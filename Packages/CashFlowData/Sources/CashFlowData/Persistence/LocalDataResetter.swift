@@ -114,13 +114,19 @@ public actor LocalDataResetter {
         }
     }
 
-    /// Writes durable link metadata without a sync watermark (used after reset-keep-link).
-    public func upsertConnectionPlaceholder(providerName: String, isDemo: Bool) async throws {
+    /// Writes durable link metadata without a sync watermark (used after reset-keep-link / claim).
+    public func upsertConnectionPlaceholder(
+        providerName: String,
+        isDemo: Bool,
+        source: ProviderSource? = nil,
+        linkNamespace: String? = nil
+    ) async throws {
         let context = ModelContext(modelContainer)
         do {
             let predicate = #Predicate<ConnectionEntity> { $0.id == "primary" }
             var descriptor = FetchDescriptor<ConnectionEntity>(predicate: predicate)
             descriptor.fetchLimit = 1
+            let resolvedSource = source ?? (isDemo ? .demo : .simpleFIN)
             if let existing = try context.fetch(descriptor).first {
                 existing.providerName = providerName
                 existing.isDemo = isDemo
@@ -130,6 +136,11 @@ public actor LocalDataResetter {
                 existing.historyComplete = false
                 existing.earliestFetchedDate = nil
                 existing.lastBackfillAdvanceAt = nil
+                existing.source = resolvedSource
+                if let linkNamespace {
+                    existing.linkNamespace = linkNamespace
+                }
+                existing.inventoryCompleteness = .incomplete
             } else {
                 context.insert(
                     ConnectionEntity(
@@ -137,6 +148,8 @@ public actor LocalDataResetter {
                         needsReauth: false,
                         lastSuccessfulSyncAt: nil,
                         isDemo: isDemo,
+                        source: resolvedSource,
+                        linkNamespace: linkNamespace,
                         historyComplete: false,
                         historyBackfillComplete: false
                     )

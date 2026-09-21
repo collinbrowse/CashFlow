@@ -4,6 +4,7 @@ import CashFlowKit
 /// Deterministic fake bank data for portfolio screenshots, CI, and large-list perf.
 public actor DemoBankLinkingService: BankLinkingServing {
     public let providerName = "Demo"
+    public static let linkNamespace = "demo"
 
     public enum SeedSize: Sendable {
         case standard
@@ -31,14 +32,23 @@ public actor DemoBankLinkingService: BankLinkingServing {
             isLinked: isLinked,
             providerName: providerName,
             needsReauth: false,
-            lastSuccessfulSyncAt: isLinked ? clock : nil
+            lastSuccessfulSyncAt: isLinked ? clock : nil,
+            linkNamespace: isLinked ? Self.linkNamespace : nil
         )
     }
 
-    public func link(withSetupToken token: String) async throws {
-        // Accept "demo" or any token for demo provider.
+    @discardableResult
+    public func link(
+        withSetupToken token: String,
+        preservingLinkNamespace: String?
+    ) async throws -> BankLinkReceipt {
         _ = token
+        _ = preservingLinkNamespace
         isLinked = true
+        return BankLinkReceipt(
+            link: ProviderLinkIdentity(source: .demo, linkNamespace: Self.linkNamespace),
+            providerName: providerName
+        )
     }
 
     public func unlink(removeLocalData: Bool) async throws {
@@ -72,7 +82,11 @@ public actor DemoBankLinkingService: BankLinkingServing {
             endDate: endDate
         )
         onWindowProgress?(1, 1)
-        return RemoteSyncPayload(accounts: accounts)
+        return RemoteSyncPayload(
+            source: ProviderLinkIdentity(source: .demo, linkNamespace: Self.linkNamespace),
+            accounts: accounts,
+            inventoryCompleteness: .complete
+        )
     }
 
     public static func makeAccounts(
@@ -81,6 +95,7 @@ public actor DemoBankLinkingService: BankLinkingServing {
         startDate: Date? = nil,
         endDate: Date? = nil
     ) -> [RemoteAccountSnapshot] {
+        let link = ProviderLinkIdentity(source: .demo, linkNamespace: linkNamespace)
         let checkingID = "demo-checking"
         let cardID = "demo-card"
         var checkingTx: [RemoteTransactionSnapshot] = []
@@ -102,7 +117,6 @@ public actor DemoBankLinkingService: BankLinkingServing {
             ("Coffee Shop", SystemCategory.dining, Decimal(-6.50)),
         ]
 
-        // Single paycheck in the current month (about a week ago).
         let paycheckDaysAgo = 7
         let paycheckDate = calendar.date(byAdding: .day, value: -paycheckDaysAgo, to: now) ?? now
         if startDate.map({ paycheckDate >= $0 }) ?? true,
@@ -121,15 +135,13 @@ public actor DemoBankLinkingService: BankLinkingServing {
             )
         }
 
-        // Bias recent history so "This Month" / "Last 30 Days" have dense, verifiable activity.
         for index in 0..<count {
             let daysAgo: Int
             if index < 60 {
-                daysAgo = index // one tx per day for the last ~60 days
+                daysAgo = index
             } else {
                 daysAgo = 60 + ((index - 60) % 340)
             }
-            // Skip the paycheck day so we don't stack another txn on top of the sole income.
             if daysAgo == paycheckDaysAgo { continue }
 
             let date = calendar.date(byAdding: .day, value: -daysAgo, to: now) ?? now
@@ -155,22 +167,32 @@ public actor DemoBankLinkingService: BankLinkingServing {
 
         return [
             RemoteAccountSnapshot(
-                externalID: checkingID,
+                identity: RemoteAccountIdentity(
+                    link: link,
+                    connectionID: "demo-conn",
+                    accountID: checkingID
+                ),
                 name: "Everyday Checking",
                 institutionName: "Demo Bank",
                 currencyCode: "USD",
                 balance: 4_250.55,
                 balanceDate: now,
-                transactions: checkingTx
+                transactions: checkingTx,
+                transactionCompleteness: .authoritative
             ),
             RemoteAccountSnapshot(
-                externalID: cardID,
+                identity: RemoteAccountIdentity(
+                    link: link,
+                    connectionID: "demo-conn",
+                    accountID: cardID
+                ),
                 name: "Rewards Card",
                 institutionName: "Demo Bank",
                 currencyCode: "USD",
                 balance: -890.12,
                 balanceDate: now,
-                transactions: cardTx
+                transactions: cardTx,
+                transactionCompleteness: .authoritative
             ),
         ]
     }

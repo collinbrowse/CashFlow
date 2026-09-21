@@ -432,6 +432,27 @@ public actor SwiftDataAccountRepository: AccountRepository {
         try context.save()
     }
 
+    public func keepLocally(accountID: AccountID) async throws {
+        let context = ModelContext(modelContainer)
+        let id = accountID.rawValue
+        let predicate = #Predicate<AccountEntity> { $0.id == id }
+        var descriptor = FetchDescriptor<AccountEntity>(predicate: predicate)
+        descriptor.fetchLimit = 1
+        guard let entity = try context.fetch(descriptor).first else {
+            throw CashFlowError.persistence(message: "Account not found.")
+        }
+        guard entity.source != .csvImport else {
+            throw CashFlowError.persistence(message: "Imported accounts are already local.")
+        }
+        guard entity.providerState == .historical || entity.providerState == .keptLocally else {
+            throw CashFlowError.persistence(
+                message: "Only accounts missing from the latest sync can be kept locally."
+            )
+        }
+        entity.providerState = .keptLocally
+        try context.save()
+    }
+
     public func create(
         name: String,
         institutionName: String,
@@ -444,10 +465,13 @@ public actor SwiftDataAccountRepository: AccountRepository {
             throw CashFlowError.persistence(message: "Account name can't be empty.")
         }
         let id = UUID().uuidString
-        let externalID = "csv:\(id)"
+        let identityKey = ProviderIdentityEncoding.csvAccountKey(localAccountID: id)
         let entity = AccountEntity(
             id: id,
-            externalID: externalID,
+            identityKey: identityKey,
+            source: .csvImport,
+            linkNamespace: id,
+            providerAccountID: identityKey,
             name: trimmed,
             institutionName: institutionName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                 ? "CSV Import"
@@ -456,7 +480,8 @@ public actor SwiftDataAccountRepository: AccountRepository {
             balance: 0,
             balanceDate: .now,
             userEditedName: true,
-            createdByImportBatchID: createdByImportBatchID?.rawValue
+            createdByImportBatchID: createdByImportBatchID?.rawValue,
+            providerState: .current
         )
         context.insert(entity)
         try context.save()

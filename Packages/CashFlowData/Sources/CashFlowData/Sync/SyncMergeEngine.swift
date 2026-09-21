@@ -5,15 +5,23 @@ import CashFlowKit
 enum SyncMergeEngine {
     static func merge(
         payload: RemoteSyncPayload,
-        into context: ModelContext
+        into context: ModelContext,
+        syncedAt: Date = .now,
+        pruneStalePending: Bool = true,
+        persist: Bool = true
     ) throws {
         let rules = try loadRules(from: context)
-        var touchedAccountExternalIDs = Set<String>()
-        touchedAccountExternalIDs.reserveCapacity(payload.accounts.count)
+        var touchedIdentityKeys = Set<String>()
+        touchedIdentityKeys.reserveCapacity(payload.accounts.count)
 
         for remoteAccount in payload.accounts {
-            touchedAccountExternalIDs.insert(remoteAccount.externalID)
-            let account = try upsertAccount(remoteAccount, context: context)
+            touchedIdentityKeys.insert(remoteAccount.identityKey)
+            let account = try upsertAccount(
+                remoteAccount,
+                source: payload.source,
+                syncedAt: syncedAt,
+                context: context
+            )
             var remoteExternalIDs = Set<String>()
             remoteExternalIDs.reserveCapacity(remoteAccount.transactions.count)
             for remoteTx in remoteAccount.transactions {
@@ -21,41 +29,51 @@ enum SyncMergeEngine {
                 try upsertTransaction(
                     remoteTx,
                     account: account,
+                    source: payload.source.source,
                     rules: rules,
                     context: context
                 )
             }
-            // With pending=1, the payload's pending set is authoritative for this account.
-            // Drop local pendings that vanished (posted under a new id, or cancelled).
-            try removeStalePendingTransactions(
-                account: account,
-                remoteExternalIDs: remoteExternalIDs,
-                context: context
-            )
+            if remoteAccount.transactionCompleteness == .authoritative, pruneStalePending {
+                try removeStalePendingTransactions(
+                    account: account,
+                    remoteExternalIDs: remoteExternalIDs,
+                    context: context
+                )
+            }
         }
 
-        // Bridge may omit a failing FI from `accounts` while still reporting it in errlist.
-        // Attach those leftover messages to matching local rows so Accounts doesn't stay "Sync OK".
-        try applyUnmatchedProviderMessages(
-            messages: payload.providerMessages,
-            remoteAccounts: payload.accounts,
-            excludingExternalIDs: touchedAccountExternalIDs,
+        try markUnseenAccountsHistorical(
+            source: payload.source,
+            excludingIdentityKeys: touchedIdentityKeys,
+            authoritativeConnectionIDs: payload.authoritativeConnectionIDs,
+            hasGlobalIncompleteness: payload.hasGlobalIncompleteness,
             into: context
         )
-        try context.save()
+
+        try applyUnmatchedProviderMessages(
+            issues: payload.issues,
+            messages: payload.providerMessages,
+            remoteAccounts: payload.accounts,
+            excludingIdentityKeys: touchedIdentityKeys,
+            into: context
+        )
+        if persist {
+            try context.save()
+        }
     }
 
-    /// Propagates provider messages that never landed on a remote snapshot onto local accounts.
     static func applyUnmatchedProviderMessages(
+        issues: [RemoteProviderIssue] = [],
         messages: [String],
         remoteAccounts: [RemoteAccountSnapshot],
-        excludingExternalIDs: Set<String>,
+        excludingIdentityKeys: Set<String>,
         into context: ModelContext
     ) throws {
         let actionable = messages
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty && !SimpleFINClient.isBenignDateRangeAdvisory($0) }
-        guard !actionable.isEmpty else { return }
+        guard !actionable.isEmpty || !issues.isEmpty else { return }
 
         let attachedMessages = Set(
             remoteAccounts.compactMap { account -> String? in
@@ -69,24 +87,37 @@ enum SyncMergeEngine {
         let unmatched = actionable.filter { message in
             let key = message.lowercased()
             if attachedMessages.contains(key) { return false }
-            // A remote syncIssue may join several messages; treat contained messages as attached.
             return !attachedMessages.contains { $0.contains(key) || key.contains($0) }
         }
-        guard !unmatched.isEmpty else { return }
 
         let locals = try context.fetch(FetchDescriptor<AccountEntity>())
-        let untouched = locals.filter { !excludingExternalIDs.contains($0.externalID) }
+        let untouched = locals.filter { !excludingIdentityKeys.contains($0.identityKey) }
         guard !untouched.isEmpty else { return }
 
         let broadcastAll = remoteAccounts.isEmpty
         for account in untouched {
-            let matching = unmatched.filter { message in
+            var matching = unmatched.filter { message in
                 if broadcastAll { return true }
                 return SimpleFINClient.messageMatchesAccountIdentity(
                     message,
                     name: account.name,
                     institutionName: account.institutionName
                 )
+            }
+            for issue in issues {
+                switch issue.scope {
+                case .global:
+                    matching.append(issue.message)
+                case .connection(let connID):
+                    if account.providerConnectionID == connID {
+                        matching.append(issue.message)
+                    }
+                case .account(let connID, let accountID):
+                    guard account.providerAccountID == accountID else { continue }
+                    if connID.isEmpty || account.providerConnectionID == connID {
+                        matching.append(issue.message)
+                    }
+                }
             }
             guard !matching.isEmpty else { continue }
             account.syncIssue = SimpleFINClient.mergeSyncIssues(
@@ -108,10 +139,12 @@ enum SyncMergeEngine {
 
     private static func upsertAccount(
         _ remote: RemoteAccountSnapshot,
+        source: ProviderLinkIdentity,
+        syncedAt: Date,
         context: ModelContext
     ) throws -> AccountEntity {
-        let externalID = remote.externalID
-        let predicate = #Predicate<AccountEntity> { $0.externalID == externalID }
+        let identityKey = remote.identityKey
+        let predicate = #Predicate<AccountEntity> { $0.identityKey == identityKey }
         var descriptor = FetchDescriptor<AccountEntity>(predicate: predicate)
         descriptor.fetchLimit = 1
 
@@ -127,40 +160,99 @@ enum SyncMergeEngine {
             existing.currencyCode = remote.currencyCode
             existing.balance = remote.balance
             existing.balanceDate = remote.balanceDate
-            existing.connectionExternalID = remote.connectionExternalID
+            existing.providerConnectionID = remote.identity.connectionID
+            existing.providerAccountID = remote.identity.accountID
+            existing.providerOrganizationID = remote.organization?.id
+            existing.rawProviderName = remote.providerName
+            existing.linkNamespace = source.linkNamespace
+            existing.sourceRaw = source.source.rawValue
             existing.syncIssue = remote.syncIssue
+            existing.providerLastSeenAt = syncedAt
+            existing.providerState = .current
+            existing.externalID = identityKey
             return existing
         }
 
         let entity = AccountEntity(
             id: UUID().uuidString,
-            externalID: remote.externalID,
+            identityKey: identityKey,
+            source: source.source,
+            linkNamespace: source.linkNamespace,
+            providerConnectionID: remote.identity.connectionID,
+            providerAccountID: remote.identity.accountID,
+            providerOrganizationID: remote.organization?.id,
+            rawProviderName: remote.providerName,
             name: remote.name,
             institutionName: remote.institutionName,
             currencyCode: remote.currencyCode,
             balance: remote.balance,
             balanceDate: remote.balanceDate,
-            userEditedName: false,
-            connectionExternalID: remote.connectionExternalID,
-            syncIssue: remote.syncIssue
+            syncIssue: remote.syncIssue,
+            providerLastSeenAt: syncedAt,
+            providerState: .current
         )
         context.insert(entity)
         return entity
     }
 
+    private static func markUnseenAccountsHistorical(
+        source: ProviderLinkIdentity,
+        excludingIdentityKeys: Set<String>,
+        authoritativeConnectionIDs: Set<String>,
+        hasGlobalIncompleteness: Bool,
+        into context: ModelContext
+    ) throws {
+        let namespace = source.linkNamespace
+        let sourceRaw = source.source.rawValue
+        let locals = try context.fetch(FetchDescriptor<AccountEntity>())
+        let canArchiveForeignNamespaces = !hasGlobalIncompleteness && !authoritativeConnectionIDs.isEmpty
+        for account in locals {
+            guard account.createdByImportBatchID == nil,
+                  account.sourceRaw != ProviderSource.csvImport.rawValue,
+                  !excludingIdentityKeys.contains(account.identityKey)
+            else { continue }
+
+            if account.sourceRaw == sourceRaw, account.linkNamespace != namespace {
+                if canArchiveForeignNamespaces {
+                    markUnseen(account)
+                }
+                continue
+            }
+
+            guard account.sourceRaw == sourceRaw,
+                  account.linkNamespace == namespace
+            else { continue }
+
+            let connID = account.providerConnectionID ?? ""
+            guard authoritativeConnectionIDs.contains(connID) else { continue }
+            markUnseen(account)
+        }
+    }
+
+    /// Closed / leftover accounts stay historical unless the user already kept them locally.
+    private static func markUnseen(_ account: AccountEntity) {
+        guard account.providerState != .keptLocally else { return }
+        account.providerState = .historical
+    }
+
     private static func upsertTransaction(
         _ remote: RemoteTransactionSnapshot,
         account: AccountEntity,
+        source: ProviderSource,
         rules: [CategorizationRule],
         context: ModelContext
     ) throws {
-        let syncKey = "\(account.externalID)|\(remote.externalID)"
-        let predicate = #Predicate<TransactionEntity> { $0.syncKey == syncKey }
+        let identityKey = ProviderIdentityEncoding.transactionKey(
+            source: source,
+            localAccountID: account.id,
+            sourceTransactionID: remote.externalID
+        )
+        let predicate = #Predicate<TransactionEntity> { $0.identityKey == identityKey }
         var descriptor = FetchDescriptor<TransactionEntity>(predicate: predicate)
         descriptor.fetchLimit = 1
 
         let remoteDomain = Transaction(
-            id: TransactionID(syncKey),
+            id: TransactionID(identityKey),
             accountID: AccountID(account.id),
             externalID: remote.externalID,
             amount: remote.amount,
@@ -196,6 +288,8 @@ enum SyncMergeEngine {
             existing.titleSourceRaw = EntityMappers.titleSourceRaw(from: merged.titleSource)
             existing.categorySourceRaw = EntityMappers.categorySourceRaw(from: merged.categorySource)
             existing.suppressedTagIDsData = try EntityMappers.encodeTagIDs(merged.suppressedTagIDs)
+            existing.identityKey = identityKey
+            existing.syncKey = identityKey
             try applyTags(merged.tagIDs, to: existing, context: context)
         } else {
             let merged = MergeSyncPolicy.merge(
@@ -215,7 +309,7 @@ enum SyncMergeEngine {
                 currencyCode: account.currencyCode,
                 userEditedCategory: merged.userEditedCategory,
                 isPending: remote.isPending,
-                syncKey: syncKey,
+                identityKey: identityKey,
                 account: account,
                 categoryLocked: false,
                 enrichedTitle: merged.enrichedTitle,
@@ -237,17 +331,13 @@ enum SyncMergeEngine {
         context: ModelContext
     ) throws {
         let uniqueIDs = Array(Set(tagIDs.map(\.rawValue)))
-        guard !uniqueIDs.isEmpty else {
-            // Rules never clear user tags; only write when there is something to attach.
-            return
-        }
+        guard !uniqueIDs.isEmpty else { return }
         let predicate = #Predicate<TagEntity> { uniqueIDs.contains($0.id) }
         let tags = try context.fetch(FetchDescriptor<TagEntity>(predicate: predicate))
         var byID = Dictionary(uniqueKeysWithValues: entity.tags.map { ($0.id, $0) })
         for tag in tags {
             byID[tag.id] = tag
         }
-        // Keep any local tags that still exist; add resolved rule tags.
         entity.tags = Array(byID.values)
     }
 

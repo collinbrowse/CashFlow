@@ -57,6 +57,7 @@ struct SimpleFINClientTests {
         let start = Calendar.current.date(byAdding: .day, value: -180, to: end)!
         let payload = try await client.fetchAccounts(
             accessURL: accessURL,
+            link: RemoteSyncTestFixtures.simpleFINLink,
             startDate: start,
             endDate: end
         )
@@ -99,40 +100,37 @@ struct SimpleFINClientTests {
 
     @Test("errlist attaches sync issues by account_id and conn_id")
     func attachesSyncIssues() {
-        let checking = RemoteAccountSnapshot(
-            externalID: "acct-checking",
+        let checking = RemoteSyncTestFixtures.account(
+            identity: RemoteSyncTestFixtures.simpleFINIdentity(
+                accountID: "acct-checking",
+                connectionID: "conn-bank"
+            ),
             name: "Checking",
-            institutionName: "Bank",
-            currencyCode: "USD",
             balance: 10,
-            balanceDate: .now,
-            transactions: [],
-            connectionExternalID: "conn-bank"
+            transactions: []
         )
-        let card = RemoteAccountSnapshot(
-            externalID: "acct-card",
+        let card = RemoteSyncTestFixtures.account(
+            identity: RemoteSyncTestFixtures.simpleFINIdentity(
+                accountID: "acct-card",
+                connectionID: "conn-card"
+            ),
             name: "Card",
-            institutionName: "Bank",
-            currencyCode: "USD",
             balance: -5,
-            balanceDate: .now,
-            transactions: [],
-            connectionExternalID: "conn-card"
+            transactions: []
         )
-        let healthy = RemoteAccountSnapshot(
-            externalID: "acct-ok",
+        let healthy = RemoteSyncTestFixtures.account(
+            identity: RemoteSyncTestFixtures.simpleFINIdentity(
+                accountID: "acct-ok",
+                connectionID: "conn-ok"
+            ),
             name: "Savings",
-            institutionName: "Bank",
-            currencyCode: "USD",
             balance: 100,
-            balanceDate: .now,
-            transactions: [],
-            connectionExternalID: "conn-ok"
+            transactions: []
         )
 
         let result = SimpleFINClient.applyingSyncIssues(
             to: [checking, card, healthy],
-            errors: [
+            issues: SimpleFINClient.mapIssues([
                 SimpleFINErrorDTO(
                     code: "auth",
                     msg: "Authentication failed for Checking",
@@ -151,53 +149,31 @@ struct SimpleFINClientTests {
                     connID: nil,
                     accountID: nil
                 ),
-            ]
+            ])
         )
 
-        let byID = Dictionary(uniqueKeysWithValues: result.map { ($0.externalID, $0) })
-        #expect(byID["acct-checking"]?.syncIssue == "Authentication failed for Checking")
-        #expect(byID["acct-card"]?.syncIssue == "Card connection needs attention")
-        #expect(byID["acct-ok"]?.syncIssue == nil)
+        let byAccountID = Dictionary(uniqueKeysWithValues: result.map { ($0.identity.accountID, $0) })
+        #expect(byAccountID["acct-checking"]?.syncIssue == "Authentication failed for Checking")
+        #expect(byAccountID["acct-card"]?.syncIssue == "Card connection needs attention")
+        #expect(byAccountID["acct-ok"]?.syncIssue == nil)
     }
 
-    @Test("errlist falls back to account or institution name when ids miss")
-    func attachesSyncIssuesByName() {
-        let chase = RemoteAccountSnapshot(
-            externalID: "acct-chase",
-            name: "Total Checking",
-            institutionName: "Chase",
-            currencyCode: "USD",
-            balance: 10,
-            balanceDate: .now,
-            transactions: [],
-            connectionExternalID: "conn-chase"
+    @Test("messageMatchesAccountIdentity matches institution or account name")
+    func messageMatchesAccountIdentity() {
+        #expect(
+            SimpleFINClient.messageMatchesAccountIdentity(
+                "Authentication failed for Chase",
+                name: "Total Checking",
+                institutionName: "Chase"
+            )
         )
-        let other = RemoteAccountSnapshot(
-            externalID: "acct-other",
-            name: "Everyday",
-            institutionName: "Ally",
-            currencyCode: "USD",
-            balance: 20,
-            balanceDate: .now,
-            transactions: [],
-            connectionExternalID: "conn-ally"
+        #expect(
+            !SimpleFINClient.messageMatchesAccountIdentity(
+                "Authentication failed for Chase",
+                name: "Everyday",
+                institutionName: "Ally"
+            )
         )
-
-        let result = SimpleFINClient.applyingSyncIssues(
-            to: [chase, other],
-            errors: [
-                SimpleFINErrorDTO(
-                    code: "auth",
-                    msg: "Authentication failed for Chase",
-                    connID: "stale-conn",
-                    accountID: "stale-account"
-                ),
-            ]
-        )
-
-        let byID = Dictionary(uniqueKeysWithValues: result.map { ($0.externalID, $0) })
-        #expect(byID["acct-chase"]?.syncIssue == "Authentication failed for Chase")
-        #expect(byID["acct-other"]?.syncIssue == nil)
     }
 
     @Test("Pending posted=0 maps to pending with non-epoch date")
@@ -216,6 +192,7 @@ struct SimpleFINClientTests {
         let before = Date.now.addingTimeInterval(-5)
         let payload = try await client.fetchAccounts(
             accessURL: "https://user:pass@example.com/simplefin",
+            link: RemoteSyncTestFixtures.simpleFINLink,
             startDate: Date(timeIntervalSince1970: TimeInterval(postedAnchor)),
             endDate: Date(timeIntervalSince1970: TimeInterval(postedAnchor + 86_400))
         )
@@ -265,6 +242,7 @@ struct SimpleFINClientTests {
         let client = SimpleFINClient(http: http)
         let payload = try await client.fetchAccounts(
             accessURL: "https://user:pass@example.com/simplefin",
+            link: RemoteSyncTestFixtures.simpleFINLink,
             startDate: Date(timeIntervalSince1970: 1_700_000_000),
             endDate: Date(timeIntervalSince1970: 1_700_086_400)
         )
@@ -297,6 +275,121 @@ struct SimpleFINClientTests {
         )
         let name = SimpleFINClient.institutionName(account: account, connection: connection)
         #expect(name == "Bank of America")
+    }
+
+    @Test("sfin_url and sfin-url both decode")
+    func decodesSfinURLKeys() throws {
+        let underscore = Data("""
+        {"conn_id":"c1","name":"Bank","sfin_url":"https://example.com/sfin"}
+        """.utf8)
+        let hyphen = Data("""
+        {"conn_id":"c1","name":"Bank","sfin-url":"https://example.com/hyphen"}
+        """.utf8)
+        let fromUnderscore = try JSONDecoder().decode(SimpleFINConnectionDTO.self, from: underscore)
+        let fromHyphen = try JSONDecoder().decode(SimpleFINConnectionDTO.self, from: hyphen)
+        #expect(fromUnderscore.sfinURL == "https://example.com/sfin")
+        #expect(fromHyphen.sfinURL == "https://example.com/hyphen")
+    }
+
+    @Test("Duplicate conn_id does not crash mapping")
+    func duplicateConnectionIDs() async throws {
+        let json = """
+        {"errlist":[],"connections":[{"conn_id":"c1","name":"Bank A","org_name":"Bank"},{"conn_id":"c1","name":"Bank B","org_name":"Bank"}],"accounts":[{"id":"a1","name":"Checking","currency":"USD","balance":"1.00","balance-date":1700000000,"conn_id":"c1","transactions":[]}]}
+        """
+        let http = MockHTTPClient { request in
+            (
+                Data(json.utf8),
+                HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            )
+        }
+        let client = SimpleFINClient(http: http)
+        let payload = try await client.fetchAccounts(
+            accessURL: "https://user:pass@example.com/simplefin",
+            link: RemoteSyncTestFixtures.simpleFINLink,
+            startDate: Date(timeIntervalSince1970: 1_700_000_000),
+            endDate: Date(timeIntervalSince1970: 1_700_086_400)
+        )
+        #expect(payload.accounts.count == 1)
+        #expect(payload.connections.count == 1)
+    }
+
+    @Test("Account-scoped error with conn_id does not attach to another connection")
+    func accountScopedErrorStaysOnConnection() {
+        let first = RemoteSyncTestFixtures.account(
+            identity: RemoteSyncTestFixtures.simpleFINIdentity(accountID: "same", connectionID: "c1"),
+            name: "Checking",
+            balance: 1,
+            transactions: []
+        )
+        let second = RemoteSyncTestFixtures.account(
+            identity: RemoteSyncTestFixtures.simpleFINIdentity(accountID: "same", connectionID: "c2"),
+            name: "Checking",
+            balance: 2,
+            transactions: []
+        )
+        let result = SimpleFINClient.applyingSyncIssues(
+            to: [first, second],
+            issues: SimpleFINClient.mapIssues([
+                SimpleFINErrorDTO(
+                    code: "act.failed",
+                    msg: "Failed for first connection",
+                    connID: "c1",
+                    accountID: "same"
+                ),
+            ])
+        )
+        let byConn = Dictionary(uniqueKeysWithValues: result.map { ($0.identity.connectionID, $0) })
+        #expect(byConn["c1"]?.syncIssue == "Failed for first connection")
+        #expect(byConn["c2"]?.syncIssue == nil)
+    }
+
+    @Test("Merged windows require both to be transaction-authoritative")
+    func windowMergeRequiresAuthoritativeAND() {
+        let link = RemoteSyncTestFixtures.simpleFINLink
+        let identity = RemoteSyncTestFixtures.simpleFINIdentity(accountID: "a1", connectionID: "c1")
+        let posted = RemoteTransactionSnapshot(
+            externalID: "t1",
+            amount: -1,
+            postedDate: Date(timeIntervalSince1970: 1),
+            description: "Coffee"
+        )
+        let merged = SimpleFINClient.mergePayloads(
+            [
+                RemoteSyncPayload(
+                    source: link,
+                    accounts: [
+                        RemoteAccountSnapshot(
+                            identity: identity,
+                            name: "Checking",
+                            institutionName: "Bank",
+                            currencyCode: "USD",
+                            balance: 1,
+                            balanceDate: .now,
+                            transactions: [posted],
+                            transactionCompleteness: .authoritative
+                        ),
+                    ]
+                ),
+                RemoteSyncPayload(
+                    source: link,
+                    accounts: [
+                        RemoteAccountSnapshot(
+                            identity: identity,
+                            name: "Checking",
+                            institutionName: "Bank",
+                            currencyCode: "USD",
+                            balance: 1,
+                            balanceDate: .now,
+                            transactions: [],
+                            transactionCompleteness: .incomplete
+                        ),
+                    ]
+                ),
+            ],
+            source: link
+        )
+        #expect(merged.accounts[0].transactionCompleteness == .incomplete)
+        #expect(merged.accounts[0].transactions.count == 1)
     }
 }
 

@@ -61,6 +61,7 @@
 		8D720293339928DB087B893E /* ExpenseTrackingApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2C924A6847F8190F9E8B69A /* ExpenseTrackingApp.swift */; };
 		9605495CD0609D4EBEFF196E /* SaleTagChip.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0A486FAB3757C1A4540D2728 /* SaleTagChip.swift */; };
 		97A583DCE3065E440B79DE3F /* TransactionRowView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1D7E88E3567DA3382606B90F /* TransactionRowView.swift */; };
+		A1B2C3D4E5F60718293A4B5C /* DuplicateAccountRepairSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1C2D3E4F5A60718293A4B5C /* DuplicateAccountRepairSheet.swift */; };
 		A263E4C6944D9D1E7873B6BC /* AccountsViewModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A3724526BD07BDC4F1B6FB6B /* AccountsViewModelTests.swift */; };
 		A54403A2216F9EAB7BBA6682 /* DismissKeyboardOnTap.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9D2461325028EEADEE94B7D8 /* DismissKeyboardOnTap.swift */; };
 		A66502E7095A56AF056221F4 /* HomeViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = AFC69BE388F2441680CA6CF7 /* HomeViewModel.swift */; };
@@ -148,7 +149,7 @@
 		41234919FF565D23F5BB3347 /* AppLockViewModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppLockViewModelTests.swift; sourceTree = "<group>"; };
 		435EB3E177B7D37FDE29A472 /* AssistantMessageBubble.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AssistantMessageBubble.swift; sourceTree = "<group>"; };
 		450D28C147590BB616455DB1 /* AccountsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccountsView.swift; sourceTree = "<group>"; };
-		4792FC27C37C5E86730E27C3 /* ExpenseTracking.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = ExpenseTracking.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		4792FC27C37C5E86730E27C3 /* ExpenseTracking.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = ExpenseTracking.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		49FECBF1EC41CBF8413B73EA /* AccountRowView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccountRowView.swift; sourceTree = "<group>"; };
 		4FDCAA579BFF596D9614E77E /* DemoHappyPathUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DemoHappyPathUITests.swift; sourceTree = "<group>"; };
 		52020F74B8407234B87FB77F /* AssistantViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AssistantViewModel.swift; sourceTree = "<group>"; };
@@ -165,7 +166,7 @@
 		818BA9B28223CF1B50FA3B7D /* AppLockGateView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppLockGateView.swift; sourceTree = "<group>"; };
 		8362E469EBE5A381A6794DFE /* OnboardingView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OnboardingView.swift; sourceTree = "<group>"; };
 		84EE74E0414355D7D785F684 /* TagChip.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TagChip.swift; sourceTree = "<group>"; };
-		85F222A5376811A2E5286999 /* ExpenseTrackingWidget.appex */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = "wrapper.app-extension"; path = ExpenseTrackingWidget.appex; sourceTree = BUILT_PRODUCTS_DIR; };
+		85F222A5376811A2E5286999 /* ExpenseTrackingWidget.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = ExpenseTrackingWidget.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		88CD6C4CE34B7E5AF28D89AD /* SpendingSliceCallout.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpendingSliceCallout.swift; sourceTree = "<group>"; };
 		8BB2E14CCB53383B09B6555B /* SyncProgressBanner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SyncProgressBanner.swift; sourceTree = "<group>"; };
 		8C4A5EE8694686921F086203 /* ImportCSVPickFileContent.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ImportCSVPickFileContent.swift; sourceTree = "<group>"; };
@@ -184,6 +185,7 @@
 		ACDE7652DFBA1004F29F2A6E /* TransactionFiltersForm.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TransactionFiltersForm.swift; sourceTree = "<group>"; };
 		AFC69BE388F2441680CA6CF7 /* HomeViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeViewModel.swift; sourceTree = "<group>"; };
 		B07AE7E59C9A550EE1720710 /* CashFlowKit */ = {isa = PBXFileReference; lastKnownFileType = folder; name = CashFlowKit; path = Packages/CashFlowKit; sourceTree = SOURCE_ROOT; };
+		B1C2D3E4F5A60718293A4B5C /* DuplicateAccountRepairSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DuplicateAccountRepairSheet.swift; sourceTree = "<group>"; };
 		B2C924A6847F8190F9E8B69A /* ExpenseTrackingApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExpenseTrackingApp.swift; sourceTree = "<group>"; };
 		B857CFFB066FED6C371A6505 /* HomeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeView.swift; sourceTree = "<group>"; };
 		BC6BA869713E4596BAF37CB4 /* CategorizationRulesViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CategorizationRulesViewModel.swift; sourceTree = "<group>"; };
@@ -193,7 +195,7 @@
 		C0A969761587184AD41587DC /* CategorizationRuleEditorViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CategorizationRuleEditorViewModel.swift; sourceTree = "<group>"; };
 		C545D687A63897057450D954 /* RootTabView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RootTabView.swift; sourceTree = "<group>"; };
 		CC0EC0527A7C4183BCD64F17 /* AccountRenameSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccountRenameSheet.swift; sourceTree = "<group>"; };
-		D3605B3C780BDBCC133C6E1D /* ExpenseTrackingUITests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = ExpenseTrackingUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		D3605B3C780BDBCC133C6E1D /* ExpenseTrackingUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = ExpenseTrackingUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		D3FCFCCAC67FE975168E1093 /* CashFlowWidget.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CashFlowWidget.swift; sourceTree = "<group>"; };
 		D5213B085723AD36B866CDFA /* CategorizationRuleEditorView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CategorizationRuleEditorView.swift; sourceTree = "<group>"; };
 		D61A8EA61D4E87BAE26CF5E6 /* ImportCSVMappingContent.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ImportCSVMappingContent.swift; sourceTree = "<group>"; };
@@ -256,6 +258,7 @@
 				954917A9CD7FD053E450908C /* AccountsBusyOverlay.swift */,
 				450D28C147590BB616455DB1 /* AccountsView.swift */,
 				202835CE549880BCB063FDE8 /* AccountsViewModel.swift */,
+				B1C2D3E4F5A60718293A4B5C /* DuplicateAccountRepairSheet.swift */,
 				8362E469EBE5A381A6794DFE /* OnboardingView.swift */,
 				E51E787C3750C7FC2DF416BE /* SimpleFINLinkSheet.swift */,
 			);
@@ -617,6 +620,7 @@
 				6399F355049B3421A969DD07 /* AccountsBusyOverlay.swift in Sources */,
 				626CC46DB923CCAFF9E17DAE /* AccountsView.swift in Sources */,
 				4F824FD4EFF38A3F69D3CADA /* AccountsViewModel.swift in Sources */,
+				A1B2C3D4E5F60718293A4B5C /* DuplicateAccountRepairSheet.swift in Sources */,
 				89B9AB78FDCDE9BBAEE63FFA /* ActivityShareSheet.swift in Sources */,
 				3D52C9362CCEE75D6A4E330F /* AppLockGateView.swift in Sources */,
 				5DD69C237DF37289C7996F89 /* AppLockViewModel.swift in Sources */,
@@ -724,6 +728,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				BUNDLE_LOADER = "$(TEST_HOST)";
+				DEVELOPMENT_TEAM = 84XX2W7G34;
 				GENERATE_INFOPLIST_FILE = YES;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -745,6 +750,7 @@
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 84XX2W7G34;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = ExpenseTracking/Resources/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -764,9 +770,14 @@
 				CODE_SIGN_ENTITLEMENTS = ExpenseTrackingWidget/ExpenseTrackingWidget.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 84XX2W7G34;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = ExpenseTrackingWidget/Info.plist;
-				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/Frameworks @executable_path/../../Frameworks";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
 				MARKETING_VERSION = 1.0.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.collinbrowse.expensetracking.app.widget;
 				SDKROOT = iphoneos;
@@ -779,6 +790,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				BUNDLE_LOADER = "$(TEST_HOST)";
+				DEVELOPMENT_TEAM = 84XX2W7G34;
 				GENERATE_INFOPLIST_FILE = YES;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -897,9 +909,14 @@
 				CODE_SIGN_ENTITLEMENTS = ExpenseTrackingWidget/ExpenseTrackingWidget.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 84XX2W7G34;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = ExpenseTrackingWidget/Info.plist;
-				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/Frameworks @executable_path/../../Frameworks";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
 				MARKETING_VERSION = 1.0.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.collinbrowse.expensetracking.app.widget;
 				SDKROOT = iphoneos;
@@ -974,6 +991,7 @@
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 84XX2W7G34;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = ExpenseTracking/Resources/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (

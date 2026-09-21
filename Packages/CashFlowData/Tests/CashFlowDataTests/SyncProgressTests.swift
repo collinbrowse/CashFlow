@@ -11,7 +11,7 @@ struct SyncProgressEmissionTests {
         let linking = CompositeBankLinkingService(
             demo: DemoBankLinkingService(seedSize: .standard),
             simpleFIN: SimpleFINBankLinkingService(
-                accessURLStore: InMemoryProgressAccessURLStore()
+                accessURLStore: InMemoryAccessURLStore()
             ),
             initialMode: .none
         )
@@ -78,6 +78,7 @@ struct SyncProgressEmissionTests {
         let start = Calendar.current.date(byAdding: .day, value: -180, to: end)!
         _ = try await client.fetchAccounts(
             accessURL: "https://user:pass@beta-bridge.simplefin.org/simplefin",
+            link: RemoteSyncTestFixtures.simpleFINLink,
             startDate: start,
             endDate: end,
             onWindowProgress: { completed, total in
@@ -183,26 +184,6 @@ private actor ProgressMockHTTPClient: HTTPClient {
     }
 }
 
-private final class InMemoryProgressAccessURLStore: AccessURLStoring, @unchecked Sendable {
-    private let lock = NSLock()
-    private var value: String?
-
-    func load() throws -> String? {
-        lock.lock(); defer { lock.unlock() }
-        return value
-    }
-
-    func save(_ accessURL: String) throws {
-        lock.lock(); defer { lock.unlock() }
-        value = accessURL
-    }
-
-    func delete() throws {
-        lock.lock(); defer { lock.unlock() }
-        value = nil
-    }
-}
-
 private struct FixedProgressAvailability: OnDeviceModelAvailabilityChecking {
     let value: OnDeviceModelAvailability
     init(_ value: OnDeviceModelAvailability) { self.value = value }
@@ -286,6 +267,7 @@ private final class MockEnrichmentProgressRepository: TransactionRepository, @un
 private struct EmptyAccountRepository: AccountRepository {
     func fetchAll() async throws -> [Account] { [] }
     func updateName(accountID: AccountID, name: String) async throws {}
+    func keepLocally(accountID: AccountID) async throws {}
     func create(
         name: String,
         institutionName: String,

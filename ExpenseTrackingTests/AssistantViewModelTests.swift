@@ -334,6 +334,7 @@ private struct FakeRuleApplying: CategorizationRuleApplying {
 private struct FakeAccountRepository: AccountRepository {
     func fetchAll() async throws -> [Account] { [] }
     func updateName(accountID: AccountID, name: String) async throws {}
+    func keepLocally(accountID: AccountID) async throws {}
     func create(
         name: String,
         institutionName: String,

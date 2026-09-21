@@ -2,19 +2,15 @@ import Foundation
 import CashFlowKit
 @preconcurrency import SwiftData
 
-/// Current SwiftData schema.
+/// Current SwiftData schema (V3).
 ///
-/// - Keep a **single** `VersionedSchema` listing these `@Model` types. Parallel enums that
-///   reference the same model types crash with `Duplicate version checksums detected` /
-///   unknown model version during staged migration.
 /// - Prefer **additive** fields with property defaults. Breaking shape changes require
-///   distinct V2 model types + a real `MigrationStage` — do not treat wipe as the happy path.
-/// - Incompatible / corrupt stores are wiped as a **last resort** in `ModelContainerFactory`
-///   (clears the shared App Group store the widget also reads live).
-/// - Portable backup uses a separate JSON `formatVersion` (`LocalDataExportDocument`), not
-///   this SwiftData version identifier.
-public enum CashFlowSchemaV2: VersionedSchema {
-    public static let versionIdentifier = Schema.Version(2, 0, 0)
+///   distinct model types + a real `MigrationStage` — do not treat wipe as the happy path
+///   after this release.
+/// - V3 ships with one explicit one-time ledger reset (credentials preserved in Keychain).
+/// - Portable backup uses a separate JSON `formatVersion` (`LocalDataExportDocument`).
+public enum CashFlowSchemaV3: VersionedSchema {
+    public static let versionIdentifier = Schema.Version(3, 0, 0)
     public static var models: [any PersistentModel.Type] {
         [
             AccountEntity.self,
@@ -28,12 +24,13 @@ public enum CashFlowSchemaV2: VersionedSchema {
     }
 }
 
-/// Backward-compatible alias used by older call sites / docs.
-public typealias CashFlowSchemaV1 = CashFlowSchemaV2
+/// Backward-compatible aliases used by older call sites / docs.
+public typealias CashFlowSchemaV2 = CashFlowSchemaV3
+public typealias CashFlowSchemaV1 = CashFlowSchemaV3
 
 public enum CashFlowMigrationPlan: SchemaMigrationPlan {
     public static var schemas: [any VersionedSchema.Type] {
-        [CashFlowSchemaV2.self]
+        [CashFlowSchemaV3.self]
     }
 
     public static var stages: [MigrationStage] { [] }
@@ -42,26 +39,80 @@ public enum CashFlowMigrationPlan: SchemaMigrationPlan {
 @Model
 public final class AccountEntity {
     @Attribute(.unique) public var id: String
-    @Attribute(.unique) public var externalID: String
+    /// Canonical length-prefixed provider identity key.
+    @Attribute(.unique) public var identityKey: String
+    /// Legacy alias kept for gradual call-site migration; mirrors `identityKey`.
+    public var externalID: String
+    public var sourceRaw: String = ProviderSource.simpleFIN.rawValue
+    public var linkNamespace: String = ""
+    public var providerConnectionID: String?
+    public var providerAccountID: String?
+    public var providerOrganizationID: String?
+    public var rawProviderName: String?
     public var name: String
     public var institutionName: String
     public var currencyCode: String
     public var balance: Decimal
     public var balanceDate: Date
     /// When true, sync keeps local `name` and does not apply SimpleFIN's account name.
-    /// Default on the property (not only init) so lightweight migration can fill existing rows.
     public var userEditedName: Bool = false
-    /// SimpleFIN Bridge connection id for scoping provider errors.
-    public var connectionExternalID: String?
     /// Last provider sync issue for this account; `nil` means healthy.
     public var syncIssue: String?
     /// Set when this account was created by a CSV import batch.
     public var createdByImportBatchID: String? = nil
+    public var createdAt: Date = Date()
+    public var providerLastSeenAt: Date?
+    public var providerStateRaw: String = AccountProviderState.current.rawValue
 
     @Relationship(deleteRule: .cascade, inverse: \TransactionEntity.account)
     public var transactions: [TransactionEntity] = []
 
     public init(
+        id: String,
+        identityKey: String,
+        source: ProviderSource,
+        linkNamespace: String,
+        providerConnectionID: String? = nil,
+        providerAccountID: String? = nil,
+        providerOrganizationID: String? = nil,
+        rawProviderName: String? = nil,
+        name: String,
+        institutionName: String,
+        currencyCode: String,
+        balance: Decimal,
+        balanceDate: Date,
+        userEditedName: Bool = false,
+        syncIssue: String? = nil,
+        createdByImportBatchID: String? = nil,
+        createdAt: Date = .now,
+        providerLastSeenAt: Date? = nil,
+        providerState: AccountProviderState = .current
+    ) {
+        self.id = id
+        self.identityKey = identityKey
+        self.externalID = identityKey
+        self.sourceRaw = source.rawValue
+        self.linkNamespace = linkNamespace
+        self.providerConnectionID = providerConnectionID
+        self.providerAccountID = providerAccountID
+        self.providerOrganizationID = providerOrganizationID
+        self.rawProviderName = rawProviderName
+        self.name = name
+        self.institutionName = institutionName
+        self.currencyCode = currencyCode
+        self.balance = balance
+        self.balanceDate = balanceDate
+        self.userEditedName = userEditedName
+        self.syncIssue = syncIssue
+        self.createdByImportBatchID = createdByImportBatchID
+        self.createdAt = createdAt
+        self.providerLastSeenAt = providerLastSeenAt
+        self.providerStateRaw = providerState.rawValue
+        self.transactions = []
+    }
+
+    /// Compatibility initializer used by older tests / seeders.
+    public convenience init(
         id: String,
         externalID: String,
         name: String,
@@ -74,18 +125,47 @@ public final class AccountEntity {
         syncIssue: String? = nil,
         createdByImportBatchID: String? = nil
     ) {
-        self.id = id
-        self.externalID = externalID
-        self.name = name
-        self.institutionName = institutionName
-        self.currencyCode = currencyCode
-        self.balance = balance
-        self.balanceDate = balanceDate
-        self.userEditedName = userEditedName
-        self.connectionExternalID = connectionExternalID
-        self.syncIssue = syncIssue
-        self.createdByImportBatchID = createdByImportBatchID
-        self.transactions = []
+        let source: ProviderSource = {
+            if createdByImportBatchID != nil || externalID.hasPrefix("csv:") {
+                return .csvImport
+            }
+            if externalID.hasPrefix("demo-") || externalID.contains("demo") {
+                return .demo
+            }
+            return .simpleFIN
+        }()
+        let namespace = createdByImportBatchID != nil ? id : "legacy"
+        self.init(
+            id: id,
+            identityKey: externalID,
+            source: source,
+            linkNamespace: namespace,
+            providerConnectionID: connectionExternalID,
+            providerAccountID: externalID,
+            name: name,
+            institutionName: institutionName,
+            currencyCode: currencyCode,
+            balance: balance,
+            balanceDate: balanceDate,
+            userEditedName: userEditedName,
+            syncIssue: syncIssue,
+            createdByImportBatchID: createdByImportBatchID
+        )
+    }
+
+    public var source: ProviderSource {
+        ProviderSource(rawValue: sourceRaw) ?? .simpleFIN
+    }
+
+    public var providerState: AccountProviderState {
+        get { AccountProviderState(rawValue: providerStateRaw) ?? .unknown }
+        set { providerStateRaw = newValue.rawValue }
+    }
+
+    /// Compatibility for call sites that still read `connectionExternalID`.
+    public var connectionExternalID: String? {
+        get { providerConnectionID }
+        set { providerConnectionID = newValue }
     }
 }
 
@@ -118,8 +198,10 @@ public final class TransactionEntity {
     public var ingestSourceRaw: String = IngestSource.bankLink.rawValue
     /// CSV import batch id when `ingestSource` is csvImport.
     public var importBatchID: String? = nil
-    /// Composite uniqueness helper: accountExternalID + transactionExternalID
-    @Attribute(.unique) public var syncKey: String
+    /// Canonical identity: source + local account UUID + provider transaction id.
+    @Attribute(.unique) public var identityKey: String
+    /// Legacy alias mirroring `identityKey` for gradual call-site migration.
+    public var syncKey: String
 
     public var account: AccountEntity?
 
@@ -128,6 +210,53 @@ public final class TransactionEntity {
     public var tags: [TagEntity] = []
 
     public init(
+        id: String,
+        externalID: String,
+        accountID: String,
+        amount: Decimal,
+        postedDate: Date,
+        transactionDescription: String,
+        categoryID: String,
+        currencyCode: String,
+        userEditedCategory: Bool,
+        isPending: Bool,
+        identityKey: String,
+        account: AccountEntity?,
+        categoryLocked: Bool = false,
+        enrichedTitle: String? = nil,
+        enrichedLocation: String? = nil,
+        titleSourceRaw: String? = nil,
+        categorySourceRaw: String? = nil,
+        suppressedTagIDsData: Data? = nil,
+        ingestSourceRaw: String = IngestSource.bankLink.rawValue,
+        importBatchID: String? = nil
+    ) {
+        self.id = id
+        self.externalID = externalID
+        self.accountID = accountID
+        self.amount = amount
+        self.postedDate = postedDate
+        self.transactionDescription = transactionDescription
+        self.categoryID = categoryID
+        self.currencyCode = currencyCode
+        self.userEditedCategory = userEditedCategory
+        self.isPending = isPending
+        self.identityKey = identityKey
+        self.syncKey = identityKey
+        self.account = account
+        self.categoryLocked = categoryLocked
+        self.enrichedTitle = enrichedTitle
+        self.enrichedLocation = enrichedLocation
+        self.titleSourceRaw = titleSourceRaw
+        self.categorySourceRaw = categorySourceRaw
+        self.suppressedTagIDsData = suppressedTagIDsData
+        self.ingestSourceRaw = ingestSourceRaw
+        self.importBatchID = importBatchID
+        self.tags = []
+    }
+
+    /// Compatibility initializer accepting legacy `syncKey`.
+    public convenience init(
         id: String,
         externalID: String,
         accountID: String,
@@ -149,27 +278,28 @@ public final class TransactionEntity {
         ingestSourceRaw: String = IngestSource.bankLink.rawValue,
         importBatchID: String? = nil
     ) {
-        self.id = id
-        self.externalID = externalID
-        self.accountID = accountID
-        self.amount = amount
-        self.postedDate = postedDate
-        self.transactionDescription = transactionDescription
-        self.categoryID = categoryID
-        self.currencyCode = currencyCode
-        self.userEditedCategory = userEditedCategory
-        self.isPending = isPending
-        self.syncKey = syncKey
-        self.account = account
-        self.categoryLocked = categoryLocked
-        self.enrichedTitle = enrichedTitle
-        self.enrichedLocation = enrichedLocation
-        self.titleSourceRaw = titleSourceRaw
-        self.categorySourceRaw = categorySourceRaw
-        self.suppressedTagIDsData = suppressedTagIDsData
-        self.ingestSourceRaw = ingestSourceRaw
-        self.importBatchID = importBatchID
-        self.tags = []
+        self.init(
+            id: id,
+            externalID: externalID,
+            accountID: accountID,
+            amount: amount,
+            postedDate: postedDate,
+            transactionDescription: transactionDescription,
+            categoryID: categoryID,
+            currencyCode: currencyCode,
+            userEditedCategory: userEditedCategory,
+            isPending: isPending,
+            identityKey: syncKey,
+            account: account,
+            categoryLocked: categoryLocked,
+            enrichedTitle: enrichedTitle,
+            enrichedLocation: enrichedLocation,
+            titleSourceRaw: titleSourceRaw,
+            categorySourceRaw: categorySourceRaw,
+            suppressedTagIDsData: suppressedTagIDsData,
+            ingestSourceRaw: ingestSourceRaw,
+            importBatchID: importBatchID
+        )
     }
 }
 
@@ -180,6 +310,10 @@ public final class ConnectionEntity {
     public var needsReauth: Bool
     public var lastSuccessfulSyncAt: Date?
     public var isDemo: Bool = false
+    public var sourceRaw: String = ProviderSource.simpleFIN.rawValue
+    public var linkNamespace: String? = nil
+    public var inventoryCompletenessRaw: String = RemoteInventoryCompleteness.incomplete.rawValue
+    public var lastSyncIssuesData: Data? = nil
     /// Oldest posted date the provider has been asked for so far; nil before the first sync.
     public var earliestFetchedDate: Date? = nil
     /// `HistoryLookbackYears.rawValue` the user asked us to import.
@@ -197,6 +331,9 @@ public final class ConnectionEntity {
         needsReauth: Bool = false,
         lastSuccessfulSyncAt: Date? = nil,
         isDemo: Bool = false,
+        source: ProviderSource = .simpleFIN,
+        linkNamespace: String? = nil,
+        inventoryCompleteness: RemoteInventoryCompleteness = .incomplete,
         earliestFetchedDate: Date? = nil,
         lookbackYearsRaw: Int = 2,
         historyComplete: Bool = false,
@@ -208,6 +345,9 @@ public final class ConnectionEntity {
         self.needsReauth = needsReauth
         self.lastSuccessfulSyncAt = lastSuccessfulSyncAt
         self.isDemo = isDemo
+        self.sourceRaw = source.rawValue
+        self.linkNamespace = linkNamespace
+        self.inventoryCompletenessRaw = inventoryCompleteness.rawValue
         self.earliestFetchedDate = earliestFetchedDate
         self.lookbackYearsRaw = lookbackYearsRaw
         self.historyComplete = historyComplete
@@ -217,6 +357,16 @@ public final class ConnectionEntity {
 
     public var lookback: HistoryLookbackYears {
         HistoryLookbackYears(rawValue: lookbackYearsRaw) ?? .default
+    }
+
+    public var source: ProviderSource {
+        get { ProviderSource(rawValue: sourceRaw) ?? (isDemo ? .demo : .simpleFIN) }
+        set { sourceRaw = newValue.rawValue }
+    }
+
+    public var inventoryCompleteness: RemoteInventoryCompleteness {
+        get { RemoteInventoryCompleteness(rawValue: inventoryCompletenessRaw) ?? .incomplete }
+        set { inventoryCompletenessRaw = newValue.rawValue }
     }
 }
 

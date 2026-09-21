@@ -31,9 +31,10 @@ final class DependencyContainer {
     let localDataExport: any LocalDataExporting
     let csvImport: any CSVImporting
     let widgetTimelineReloader: any WidgetTimelineReloading
+    let accountDuplicateRepair: RepairDuplicateAccountUseCase
     let useLargeDemoSeed: Bool
 
-    /// Launch-safe: SwiftData load/migration failures wipe and fall back; never fails for disk issues.
+    /// Launch-safe: V3 performs one explicit ledger reset; later load failures fall back without wiping.
     convenience init(largeDemoSeed: Bool = false, uiTesting: Bool = false) {
         if uiTesting {
             do {
@@ -176,5 +177,10 @@ final class DependencyContainer {
             modelContainer: modelContainer,
             enrichment: uiTesting ? nil : enrichment
         )
+        let repairer = SwiftDataAccountDuplicateRepairer(
+            modelContainer: modelContainer,
+            widgetTimelineReloader: widgetTimelineReloader
+        )
+        self.accountDuplicateRepair = RepairDuplicateAccountUseCase(repairing: repairer)
     }
 }

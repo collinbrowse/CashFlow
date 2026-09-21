@@ -93,9 +93,13 @@ public actor LocalCSVImporter: CSVImporting {
             createdAccount = false
         case .createNew(let name, let institutionName):
             let id = UUID().uuidString
+            let identityKey = ProviderIdentityEncoding.csvAccountKey(localAccountID: id)
             let entity = AccountEntity(
                 id: id,
-                externalID: "csv:\(id)",
+                identityKey: identityKey,
+                source: .csvImport,
+                linkNamespace: id,
+                providerAccountID: identityKey,
                 name: name.trimmingCharacters(in: .whitespacesAndNewlines),
                 institutionName: institutionName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                     ? "CSV Import"
@@ -104,7 +108,8 @@ public actor LocalCSVImporter: CSVImporting {
                 balance: 0,
                 balanceDate: importedAt,
                 userEditedName: true,
-                createdByImportBatchID: batchID.rawValue
+                createdByImportBatchID: batchID.rawValue,
+                providerState: .current
             )
             context.insert(entity)
             account = entity
@@ -282,12 +287,16 @@ public actor LocalCSVImporter: CSVImporting {
         replaceEntity: TransactionEntity?,
         context: ModelContext
     ) throws {
-        let syncKey = "\(account.externalID)|\(externalID)"
+        let identityKey = ProviderIdentityEncoding.transactionKey(
+            source: .csvImport,
+            localAccountID: account.id,
+            sourceTransactionID: externalID
+        )
         let suggested = MapCSVCategoryUseCase.categoryID(forName: row.categoryName)
             ?? SystemCategory.undefined.id
 
         let remoteDomain = Transaction(
-            id: TransactionID(syncKey),
+            id: TransactionID(identityKey),
             accountID: AccountID(account.id),
             externalID: externalID,
             amount: row.amount,
@@ -314,7 +323,8 @@ public actor LocalCSVImporter: CSVImporting {
                 preferSuggestedCategory: preferSuggested
             )
             existing.externalID = externalID
-            existing.syncKey = syncKey
+            existing.identityKey = identityKey
+            existing.syncKey = identityKey
             existing.amount = merged.amount
             existing.postedDate = merged.postedDate
             existing.transactionDescription = merged.description
@@ -337,11 +347,10 @@ public actor LocalCSVImporter: CSVImporting {
             existing.importBatchID = batchID.rawValue
             existing.suppressedTagIDsData = try EntityMappers.encodeTagIDs(merged.suppressedTagIDs)
         } else {
-            let syncPredicate = #Predicate<TransactionEntity> { $0.syncKey == syncKey }
+            let syncPredicate = #Predicate<TransactionEntity> { $0.identityKey == identityKey }
             var syncDescriptor = FetchDescriptor<TransactionEntity>(predicate: syncPredicate)
             syncDescriptor.fetchLimit = 1
             if let existing = try context.fetch(syncDescriptor).first {
-                // Treat as replace when syncKey collides.
                 try upsertCSVRow(
                     row,
                     externalID: externalID,
@@ -371,7 +380,7 @@ public actor LocalCSVImporter: CSVImporting {
                 currencyCode: merged.currencyCode,
                 userEditedCategory: merged.userEditedCategory,
                 isPending: row.isPending,
-                syncKey: syncKey,
+                identityKey: identityKey,
                 account: account,
                 categoryLocked: false,
                 enrichedTitle: row.title ?? merged.enrichedTitle,

@@ -264,14 +264,11 @@ struct CategorizationRulesPersistenceTests {
         )
 
         let context = ModelContext(container)
-        let payload = RemoteSyncPayload(accounts: [
-            RemoteAccountSnapshot(
-                externalID: "a1",
+        let payload = RemoteSyncTestFixtures.demoPayload(accounts: [
+            RemoteSyncTestFixtures.account(
+                identity: RemoteSyncTestFixtures.demoIdentity(accountID: "a1"),
                 name: "Checking",
-                institutionName: "Bank",
-                currencyCode: "USD",
                 balance: 100,
-                balanceDate: .now,
                 transactions: [
                     RemoteTransactionSnapshot(
                         externalID: "t1",

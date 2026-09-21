@@ -5,13 +5,18 @@ enum EntityMappers {
     static func account(from entity: AccountEntity) -> Account {
         Account(
             id: AccountID(entity.id),
-            externalID: entity.externalID,
+            externalID: entity.identityKey,
             name: entity.name,
             institutionName: entity.institutionName,
             currencyCode: entity.currencyCode,
             balance: entity.balance,
             balanceDate: entity.balanceDate,
-            syncIssue: entity.syncIssue
+            syncIssue: entity.syncIssue,
+            source: entity.source,
+            providerState: entity.providerState,
+            providerLastSeenAt: entity.providerLastSeenAt,
+            createdAt: entity.createdAt,
+            rawProviderName: entity.rawProviderName
         )
     }
 

@@ -17,21 +17,35 @@ public actor ConnectionLifecycleService: ConnectionLifecycleServing {
         self.resetter = resetter
     }
 
-    public func replaceAndLink(withSetupToken token: String, deleteLocalData: Bool) async throws -> LinkedConnection {
+    public func replaceAndLink(
+        withSetupToken token: String,
+        deleteLocalData: Bool,
+        preservingLinkNamespace: Bool
+    ) async throws -> LinkedConnection {
         await sync.cancel()
+        let priorNamespace = await bankLinking.connectionStatus().linkNamespace
         if deleteLocalData {
-            // Wipe first so provider switches never unintentionally merge Demo fixtures.
             try await resetter.resetAll()
         }
         try? await bankLinking.unlink(removeLocalData: false)
-        try await bankLinking.link(withSetupToken: token)
+        let reusedNamespace = preservingLinkNamespace ? priorNamespace : nil
+        let receipt = try await bankLinking.link(
+            withSetupToken: token,
+            preservingLinkNamespace: reusedNamespace
+        )
+        // Persist secret-free lineage before the first sync (even if sync fails).
+        try await resetter.upsertConnectionPlaceholder(
+            providerName: receipt.providerName,
+            isDemo: receipt.link.source == .demo,
+            source: receipt.link.source,
+            linkNamespace: receipt.link.linkNamespace
+        )
         return try await sync.syncNow()
     }
 
     public func disconnect(deleteLocalData: Bool) async throws -> LinkedConnection {
         await sync.cancel()
         if deleteLocalData {
-            // Wipe before unlink so a failed wipe can be retried while still linked.
             try await resetter.resetAll()
             try await bankLinking.unlink(removeLocalData: false)
         } else {
@@ -52,11 +66,14 @@ public actor ConnectionLifecycleService: ConnectionLifecycleServing {
     public func resetLocalDataKeepingLink() async throws -> LinkedConnection {
         await sync.cancel()
         let prior = await sync.connectionStatus()
+        let priorEntity = await sync.storedConnectionMetadata()
         try await resetter.resetAll()
         if prior.isLinked {
             try await resetter.upsertConnectionPlaceholder(
                 providerName: prior.providerName,
-                isDemo: prior.providerName == "Demo"
+                isDemo: prior.providerName == "Demo",
+                source: priorEntity?.source ?? (prior.providerName == "Demo" ? .demo : .simpleFIN),
+                linkNamespace: prior.linkNamespace ?? priorEntity?.linkNamespace
             )
             if prior.providerName == "Demo" {
                 await bankLinking.adoptDurableDemoLink()

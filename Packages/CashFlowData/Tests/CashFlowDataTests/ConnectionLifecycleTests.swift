@@ -35,7 +35,7 @@ struct ConnectionLifecycleTests {
         _ = try await harness.lifecycle.replaceAndLink(withSetupToken: makeSetupToken(), deleteLocalData: true)
         let afterSimpleFIN = try ModelContext(harness.container).fetch(FetchDescriptor<AccountEntity>())
         #expect(afterSimpleFIN.allSatisfy { $0.institutionName != "Demo Bank" })
-        #expect(afterSimpleFIN.contains(where: { $0.externalID == "sf-checking" }))
+        #expect(afterSimpleFIN.contains(where: { $0.providerAccountID == "sf-checking" }))
 
         let status = await harness.sync.connectionStatus()
         #expect(status.providerName == "SimpleFIN")
@@ -68,7 +68,7 @@ struct ConnectionLifecycleTests {
         )
         let after = try ModelContext(harness.container).fetch(FetchDescriptor<AccountEntity>())
         #expect(after.contains(where: { $0.externalID == "csv:keep-me" }))
-        #expect(after.contains(where: { $0.externalID == "sf-checking" }))
+        #expect(after.contains(where: { $0.providerAccountID == "sf-checking" }))
     }
 
     @Test("Disconnect keep leaves accounts; eraseEverything clears orphan state")
@@ -92,7 +92,7 @@ struct ConnectionLifecycleTests {
     @Test("Unauthorized sync persists needsReauth on ConnectionEntity")
     func unauthorizedNeedsReauthSurvives() async throws {
         let accessStore = InMemoryAccessURLStore()
-        try accessStore.save("https://user:pass@example.com/simplefin")
+        try accessStore.saveTestAccessURL("https://user:pass@example.com/simplefin")
 
         let http = SimpleFINStubHTTPClient(mode: .succeedThenUnauthorized)
         let simpleFIN = SimpleFINBankLinkingService(
@@ -150,6 +150,64 @@ struct ConnectionLifecycleTests {
         #expect(accounts.isEmpty)
         #expect(try harness.accessURLStore.load() != nil)
     }
+
+    @Test("Reconnect preserving namespace reuses the Keychain namespace")
+    func reconnectPreservesNamespace() async throws {
+        let harness = try await makeHarness()
+        _ = try await harness.lifecycle.replaceAndLink(
+            withSetupToken: makeSetupToken(),
+            deleteLocalData: true
+        )
+        let original = try #require(try harness.accessURLStore.loadEnvelope()?.linkNamespace)
+        _ = try await harness.lifecycle.replaceAndLink(
+            withSetupToken: makeSetupToken(),
+            deleteLocalData: false,
+            preservingLinkNamespace: true
+        )
+        let reused = try #require(try harness.accessURLStore.loadEnvelope()?.linkNamespace)
+        #expect(reused == original)
+    }
+
+    @Test("Keep-local without preserving mints a new namespace")
+    func keepLocalMintsNewNamespace() async throws {
+        let harness = try await makeHarness()
+        _ = try await harness.lifecycle.replaceAndLink(
+            withSetupToken: makeSetupToken(),
+            deleteLocalData: true
+        )
+        let original = try #require(try harness.accessURLStore.loadEnvelope()?.linkNamespace)
+        _ = try await harness.lifecycle.replaceAndLink(
+            withSetupToken: makeSetupToken(),
+            deleteLocalData: false,
+            preservingLinkNamespace: false
+        )
+        let minted = try #require(try harness.accessURLStore.loadEnvelope()?.linkNamespace)
+        #expect(minted != original)
+    }
+
+    @Test("Successful sync persists lastSyncIssuesData")
+    func persistsLastSyncIssues() async throws {
+        let accessStore = InMemoryAccessURLStore()
+        try accessStore.saveTestAccessURL("https://user:pass@example.com/simplefin")
+        let http = IssuesAccountsHTTPClient()
+        let linking = CompositeBankLinkingService(
+            demo: DemoBankLinkingService(),
+            simpleFIN: SimpleFINBankLinkingService(
+                client: SimpleFINClient(http: http),
+                accessURLStore: accessStore
+            ),
+            initialMode: .simpleFIN
+        )
+        let container = try ModelContainerFactory.make(inMemory: true)
+        let sync = SyncCoordinator(modelContainer: container, bankLinking: linking)
+        _ = try await sync.syncNow()
+        let connection = try #require(
+            try ModelContext(container).fetch(FetchDescriptor<ConnectionEntity>()).first
+        )
+        let data = try #require(connection.lastSyncIssuesData)
+        let issues = try JSONDecoder().decode([RemoteProviderIssue].self, from: data)
+        #expect(issues.contains(where: { $0.message == "Bank needs attention" }))
+    }
 }
 
 // MARK: - Harness
@@ -197,26 +255,6 @@ private func accountsJSON(id: String, name: String) -> Data {
     Data("""
     {"errors":[],"errlist":[],"accounts":[{"id":"\(id)","name":"\(name)","currency":"USD","balance":"10.00","balance-date":1700000000,"org":{"name":"Real Bank"},"transactions":[]}]}
     """.utf8)
-}
-
-private final class InMemoryAccessURLStore: AccessURLStoring, @unchecked Sendable {
-    private let lock = NSLock()
-    private var value: String?
-
-    func save(_ accessURL: String) throws {
-        lock.lock(); defer { lock.unlock() }
-        value = accessURL
-    }
-
-    func load() throws -> String? {
-        lock.lock(); defer { lock.unlock() }
-        return value
-    }
-
-    func delete() throws {
-        lock.lock(); defer { lock.unlock() }
-        value = nil
-    }
 }
 
 private actor SimpleFINStubHTTPClient: HTTPClient {
@@ -269,6 +307,26 @@ private actor SimpleFINStubHTTPClient: HTTPClient {
         // Any accounts window
         return (
             accountsJSON(id: "sf-checking", name: "Checking"),
+            HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!
+        )
+    }
+}
+
+private actor IssuesAccountsHTTPClient: HTTPClient {
+    func data(for request: URLRequest) async throws -> (Data, HTTPURLResponse) {
+        let url = request.url ?? URL(string: "https://example.com")!
+        let path = url.path
+        if path.contains("info") {
+            return (
+                Data(#"{"versions":["1","2"]}"#.utf8),
+                HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            )
+        }
+        let json = """
+        {"errors":[],"errlist":[{"code":"con.auth","msg":"Bank needs attention","conn_id":"c1"}],"connections":[{"conn_id":"c1","name":"Bank","org_name":"Real Bank"}],"accounts":[{"id":"sf-checking","name":"Checking","currency":"USD","balance":"10.00","balance-date":1700000000,"conn_id":"c1","org":{"name":"Real Bank"},"transactions":[]}]}
+        """
+        return (
+            Data(json.utf8),
             HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!
         )
     }

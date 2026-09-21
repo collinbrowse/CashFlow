@@ -46,6 +46,7 @@ Code: `CashFlowKit` (Tag + breakdown use case), `CashFlowData` (TagEntity), `Exp
 - Orphan leftover-data recovery when Not linked but rows remain
 - Account list with balance on the trailing edge; tap opens Transactions filtered to that account
 - Local account rename (survives sync while the SimpleFIN account still matches); new accounts take the SimpleFIN name
+- Re-link / keep-local can leave a **historical** copy next to the new **Sync OK** row. Historical rows say **Swipe to repair duplicate**; swipe **Repair** to merge, or **Keep locally** if it is not a duplicate (warning dismissed, later syncs leave it alone unless SimpleFIN returns it again)
 - First-launch onboarding: Demo · Link · Skip
 - Settings (gear from Accounts): About + local-data privacy note + app lock
 

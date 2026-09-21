@@ -47,20 +47,30 @@ public actor CompositeBankLinkingService: BankLinkingServing {
         }
     }
 
-    public func link(withSetupToken token: String) async throws {
+    public func link(
+        withSetupToken token: String,
+        preservingLinkNamespace: String?
+    ) async throws -> BankLinkReceipt {
         let trimmed = token.trimmingCharacters(in: .whitespacesAndNewlines)
         let lower = trimmed.lowercased()
         if lower == "demo" || lower == "demo-large" {
             // Mutual exclusion: clear SimpleFIN credentials before enabling Demo.
             try await simpleFIN.unlink(removeLocalData: false)
-            try await demo.link(withSetupToken: trimmed)
+            let receipt = try await demo.link(
+                withSetupToken: trimmed,
+                preservingLinkNamespace: preservingLinkNamespace
+            )
             mode = .demo
-            return
+            return receipt
         }
         // Mutual exclusion: clear Demo session before enabling SimpleFIN.
         try await demo.unlink(removeLocalData: false)
-        try await simpleFIN.link(withSetupToken: trimmed)
+        let receipt = try await simpleFIN.link(
+            withSetupToken: trimmed,
+            preservingLinkNamespace: preservingLinkNamespace
+        )
         mode = .simpleFIN
+        return receipt
     }
 
     public func unlink(removeLocalData: Bool) async throws {
