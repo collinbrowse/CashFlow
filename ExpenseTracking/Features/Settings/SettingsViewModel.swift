@@ -62,6 +62,8 @@ final class SettingsViewModel {
     private(set) var isTitleCleanupPaused: Bool
     /// True while `startTitleCleanup` owns the drain lifecycle (ignore hub `nil` races).
     private var ownsActiveDrain = false
+    /// Set by Stop during the reload/availability window, before the scheduler session exists.
+    private var stopRequested = false
 
     private var progressObservation: Task<Void, Never>?
     private let resolveConflicts = ResolveImportConflictsUseCase()
@@ -237,8 +239,11 @@ final class SettingsViewModel {
             && modelAvailability == .available
     }
 
+    var canStopTitleCleanup: Bool { isCleaningUpTitles }
+
     var titleCleanupActionTitle: String {
-        isTitleCleanupPaused ? "Resume" : "Clean up transactions"
+        if isCleaningUpTitles { return "Stop" }
+        return isTitleCleanupPaused ? "Resume" : "Clean up transactions"
     }
 
     /// Shows a badge on the Settings tab while cleanup runs.
@@ -300,9 +305,17 @@ final class SettingsViewModel {
 
     /// Shared entry point for Settings button and the first-sync prompt.
     func startTitleCleanup(expectedUntitled: Int? = nil) async {
-        guard !isCleaningUpTitles else { return }
+        // Already showing as running — Stop is the way out. Resume while the UI is
+        // paused still reaches `runFullEnrichmentDrain`, which reattaches to a live
+        // pass or waits out a stopping one then starts fresh.
+        if isCleaningUpTitles { return }
+        stopRequested = false
 
         cleanupErrorMessage = nil
+        ownsActiveDrain = true
+        isCleaningUpTitles = true
+        cleanupPhase = .running
+        cleanupDetail = nil
         setTitleCleanupPaused(false)
         // Re-read the backlog before a user-started run — the idle line may be a
         // preserved snapshot that shouldn't drive expected totals.
@@ -312,14 +325,11 @@ final class SettingsViewModel {
         let expected = expectedUntitled
             ?? ((historyStatus?.untitledCount ?? 0) + (historyStatus?.undefinedCount ?? 0))
         guard expected > 0 else {
+            ownsActiveDrain = false
+            isCleaningUpTitles = false
             setTitleCleanupPaused(false)
             return
         }
-        ownsActiveDrain = true
-        // Immediate UI so the prompt / button feel responsive.
-        isCleaningUpTitles = true
-        cleanupPhase = .running
-        cleanupDetail = nil
         cleanupCompleted = 0
         cleanupTotal = max(expected, 1)
 
@@ -330,6 +340,15 @@ final class SettingsViewModel {
             ownsActiveDrain = false
             cleanupErrorMessage = titleCleanupFootnote
             await reloadHistoryStatus(refreshTitleBacklog: true)
+            return
+        }
+        if stopRequested {
+            ownsActiveDrain = false
+            isCleaningUpTitles = false
+            cleanupPhase = .running
+            cleanupDetail = nil
+            await reloadHistoryStatus()
+            setTitleCleanupPaused(historyStatus?.needsCleanup == true)
             return
         }
 
@@ -347,6 +366,18 @@ final class SettingsViewModel {
         cleanupDetail = nil
         await reloadHistoryStatus()
         applyDrainOutcome(outcome)
+    }
+
+    func stopTitleCleanup() async {
+        stopRequested = true
+        await backgroundEnrichment.stopFullEnrichmentDrain()
+        if !ownsActiveDrain {
+            isCleaningUpTitles = false
+            cleanupPhase = .running
+            cleanupDetail = nil
+            await reloadHistoryStatus()
+            setTitleCleanupPaused(historyStatus?.needsCleanup == true)
+        }
     }
 
     /// Back-compat name used by the Settings button.

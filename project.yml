@@ -22,6 +22,7 @@ targets:
     platform: iOS
     sources:
       - path: ExpenseTracking
+      - path: Shared/LiveActivities
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.collinbrowse.expensetracking.app
@@ -43,6 +44,7 @@ targets:
       - path: ExpenseTrackingWidget
         excludes:
           - Info.plist
+      - path: Shared/LiveActivities
     info:
       path: ExpenseTrackingWidget/Info.plist
       properties:

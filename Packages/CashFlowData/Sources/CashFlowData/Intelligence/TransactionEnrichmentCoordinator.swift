@@ -21,6 +21,9 @@ public actor TransactionEnrichmentCoordinator: TransactionEnrichmentRunning {
     private let workCoordinator: FoundationModelsWorkCoordinator
     private var isRunning = false
     private var fullDrainRunning = false
+    /// Set when a user/full drain wants the runner; the incremental pass exits at the next check.
+    private var preemptIncremental = false
+    private var idleWaiters: [UUID: CheckedContinuation<Void, Never>] = [:]
 
     public init(
         availability: any OnDeviceModelAvailabilityChecking,
@@ -69,8 +72,15 @@ public actor TransactionEnrichmentCoordinator: TransactionEnrichmentRunning {
         // Category keyword fallback still runs when models are unavailable; LLM needs availability.
         if untitled > 0, !modelsAvailable {
             // Still try keyword categorization for Undefined rows.
-            await enrichCategories(
+            guard !fullDrainRunning else { return nil }
+            isRunning = true
+            defer {
+                isRunning = false
+                notifyRunnerIdle()
+            }
+            _ = await enrichCategories(
                 unlimited: false,
+                shouldContinue: { true },
                 started: Date(),
                 timeBudgetSeconds: Self.incrementalCategoryTimeBudgetSeconds,
                 rowsBudgetRemaining: Self.incrementalCategoryRowBudget,
@@ -81,8 +91,15 @@ public actor TransactionEnrichmentCoordinator: TransactionEnrichmentRunning {
             return nil
         }
         if untitled == 0, !modelsAvailable {
-            await enrichCategories(
+            guard !fullDrainRunning else { return nil }
+            isRunning = true
+            defer {
+                isRunning = false
+                notifyRunnerIdle()
+            }
+            _ = await enrichCategories(
                 unlimited: false,
+                shouldContinue: { true },
                 started: Date(),
                 timeBudgetSeconds: Self.incrementalCategoryTimeBudgetSeconds,
                 rowsBudgetRemaining: Self.incrementalCategoryRowBudget,
@@ -93,6 +110,7 @@ public actor TransactionEnrichmentCoordinator: TransactionEnrichmentRunning {
             return nil
         }
 
+        guard !fullDrainRunning, !preemptIncremental else { return nil }
         _ = await drain(
             unlimited: false,
             shouldContinue: { true },
@@ -106,13 +124,7 @@ public actor TransactionEnrichmentCoordinator: TransactionEnrichmentRunning {
         shouldContinue: @escaping @Sendable () -> Bool,
         onProgress: (@Sendable (_ completed: Int, _ total: Int) -> Void)?
     ) async -> EnrichmentDrainOutcome {
-        guard !fullDrainRunning else { return .interrupted }
-        fullDrainRunning = true
-        defer { fullDrainRunning = false }
-        await workCoordinator.clearAssetsUnavailableCooldown()
-        _ = await workCoordinator.waitOutRateLimitPauseIfNeeded()
-        return await drain(
-            unlimited: true,
+        await drainAllNeedingEnrichment(
             shouldContinue: shouldContinue,
             onProgress: onProgress,
             onPhase: nil
@@ -124,11 +136,28 @@ public actor TransactionEnrichmentCoordinator: TransactionEnrichmentRunning {
         onProgress: (@Sendable (_ completed: Int, _ total: Int) -> Void)?,
         onPhase: (@Sendable (_ phase: EnrichmentProgress.Phase, _ detail: String?) -> Void)?
     ) async -> EnrichmentDrainOutcome {
-        guard !fullDrainRunning else { return .interrupted }
+        // Never no-op a user Resume: wait out (and preempt) in-flight work, then run.
+        await waitForRunnerIfNeeded()
+        guard shouldContinue() else { return .interrupted }
+
         fullDrainRunning = true
-        defer { fullDrainRunning = false }
+        defer {
+            fullDrainRunning = false
+            notifyRunnerIdle()
+        }
+        preemptIncremental = false
+
         await workCoordinator.clearAssetsUnavailableCooldown()
-        _ = await workCoordinator.waitOutRateLimitPauseIfNeeded()
+        if await workCoordinator.isRateLimitPaused {
+            onPhase?(
+                .coolingDown,
+                "Apple Intelligence is cooling down — waiting to continue…"
+            )
+        }
+        _ = await workCoordinator.waitOutRateLimitPauseIfNeeded(shouldContinue: shouldContinue)
+        guard shouldContinue() else { return .interrupted }
+        onPhase?(.running, nil)
+
         return await drain(
             unlimited: true,
             shouldContinue: shouldContinue,
@@ -143,18 +172,31 @@ public actor TransactionEnrichmentCoordinator: TransactionEnrichmentRunning {
         onProgress: (@Sendable (_ completed: Int, _ total: Int) -> Void)?,
         onPhase: (@Sendable (_ phase: EnrichmentProgress.Phase, _ detail: String?) -> Void)?
     ) async -> EnrichmentDrainOutcome {
-        guard !isRunning else { return .interrupted }
+        if unlimited {
+            if isRunning {
+                preemptIncremental = true
+                while isRunning {
+                    await waitUntilRunnerIdle()
+                }
+            }
+            guard shouldContinue() else { return .interrupted }
+        } else if isRunning || fullDrainRunning || preemptIncremental {
+            return .interrupted
+        }
         isRunning = true
-        defer { isRunning = false }
+        defer {
+            isRunning = false
+            notifyRunnerIdle()
+        }
 
         let availabilityState = await availability.availability()
         let assetsUnavailable = await workCoordinator.isAssetsUnavailable
         let modelsAvailable = availabilityState == .available && !assetsUnavailable
         // Full Settings drain without models still applies keyword categories.
         if !modelsAvailable {
-            let started = Date()
-            await enrichCategories(
+            let categoriesFinished = await enrichCategories(
                 unlimited: unlimited,
+                shouldContinue: shouldContinue,
                 started: Date(),
                 timeBudgetSeconds: unlimited ? .infinity : Self.incrementalCategoryTimeBudgetSeconds,
                 rowsBudgetRemaining: unlimited ? Int.max : Self.incrementalCategoryRowBudget,
@@ -162,7 +204,7 @@ public actor TransactionEnrichmentCoordinator: TransactionEnrichmentRunning {
                 completedSoFar: 0,
                 forceKeywordOnly: true
             )
-            return .completed
+            return categoriesFinished ? .completed : .interrupted
         }
 
         let started = Date()
@@ -170,7 +212,7 @@ public actor TransactionEnrichmentCoordinator: TransactionEnrichmentRunning {
         var rowsThisRun = 0
         var stuckIDs = Set<TransactionID>()
 
-        while shouldContinue() {
+        while shouldContinue(), !shouldYieldIncremental(unlimited: unlimited) {
             if await workCoordinator.isAssistantPriorityActive { return .interrupted }
             if !unlimited {
                 if rowsThisRun >= Self.incrementalRowBudget { break }
@@ -200,6 +242,7 @@ public actor TransactionEnrichmentCoordinator: TransactionEnrichmentRunning {
 
             for transaction in needing {
                 if !shouldContinue() { return .interrupted }
+                if shouldYieldIncremental(unlimited: unlimited) { return .interrupted }
                 if await workCoordinator.isAssistantPriorityActive { return .interrupted }
                 if await workCoordinator.isAssetsUnavailable { return .interrupted }
                 if !unlimited, rowsThisRun >= Self.incrementalRowBudget { break }
@@ -217,6 +260,7 @@ public actor TransactionEnrichmentCoordinator: TransactionEnrichmentRunning {
                         ? .interruptedByRateLimit
                         : .interrupted
                 }
+                if shouldYieldIncremental(unlimited: unlimited) { return .interrupted }
 
                 let title = attempt.parsed.title.trimmingCharacters(in: .whitespacesAndNewlines)
                 if !title.isEmpty {
@@ -250,6 +294,8 @@ public actor TransactionEnrichmentCoordinator: TransactionEnrichmentRunning {
             }
         }
 
+        if !shouldContinue() { return .interrupted }
+        if shouldYieldIncremental(unlimited: unlimited) { return .interrupted }
         guard !(await workCoordinator.isAssistantPriorityActive) else { return .interrupted }
 
         // Category pass gets its own time/row budget so title work cannot starve Undefined rows.
@@ -260,8 +306,9 @@ public actor TransactionEnrichmentCoordinator: TransactionEnrichmentRunning {
             categoryBudget = Self.incrementalCategoryRowBudget
         }
         let forceKeyword = assetsUnavailable || availabilityState != .available
-        await enrichCategories(
+        let categoriesFinished = await enrichCategories(
             unlimited: unlimited,
+            shouldContinue: shouldContinue,
             started: Date(),
             timeBudgetSeconds: unlimited ? .infinity : Self.incrementalCategoryTimeBudgetSeconds,
             rowsBudgetRemaining: categoryBudget,
@@ -269,6 +316,7 @@ public actor TransactionEnrichmentCoordinator: TransactionEnrichmentRunning {
             completedSoFar: completed,
             forceKeywordOnly: forceKeyword
         )
+        if !categoriesFinished { return .interrupted }
         if unlimited {
             await workCoordinator.clearRateLimitPause()
         }
@@ -301,7 +349,13 @@ public actor TransactionEnrichmentCoordinator: TransactionEnrichmentRunning {
                     exhaustedByRateLimit: sawRateLimit
                 )
             }
-            await workCoordinator.paceBeforeModelRequest()
+            await workCoordinator.paceBeforeModelRequest(shouldContinue: shouldContinue)
+            guard shouldContinue() else {
+                return DescriptionEnrichmentAttempt(
+                    parsed: ParsedTransactionDescription(title: "", location: nil, raw: raw),
+                    exhaustedByRateLimit: sawRateLimit
+                )
+            }
             let parsed = await descriptionEnricher.enrich(rawDescription: raw)
             if !parsed.title.isEmpty {
                 if let memoStore {
@@ -319,7 +373,13 @@ public actor TransactionEnrichmentCoordinator: TransactionEnrichmentRunning {
                 .coolingDown,
                 "Apple Intelligence is cooling down — waiting to continue…"
             )
-            _ = await workCoordinator.waitOutRateLimitPauseIfNeeded()
+            _ = await workCoordinator.waitOutRateLimitPauseIfNeeded(shouldContinue: shouldContinue)
+            guard shouldContinue() else {
+                return DescriptionEnrichmentAttempt(
+                    parsed: ParsedTransactionDescription(title: "", location: nil, raw: raw),
+                    exhaustedByRateLimit: true
+                )
+            }
             onPhase?(.running, nil)
         }
         return DescriptionEnrichmentAttempt(
@@ -328,15 +388,18 @@ public actor TransactionEnrichmentCoordinator: TransactionEnrichmentRunning {
         )
     }
 
+    /// Returns `false` when stopped / preempted before the category backlog was walked.
+    @discardableResult
     private func enrichCategories(
         unlimited: Bool,
+        shouldContinue: @escaping @Sendable () -> Bool,
         started: Date,
         timeBudgetSeconds: TimeInterval,
         rowsBudgetRemaining: Int,
         onProgress: (@Sendable (_ completed: Int, _ total: Int) -> Void)?,
         completedSoFar: Int,
         forceKeywordOnly: Bool
-    ) async {
+    ) async -> Bool {
         let accounts = (try? await accountRepository.fetchAll()) ?? []
         let accountsByID = Dictionary(uniqueKeysWithValues: accounts.map { ($0.id, $0) })
         let rules = (try? await ruleRepository.fetchAll()) ?? []
@@ -346,12 +409,14 @@ public actor TransactionEnrichmentCoordinator: TransactionEnrichmentRunning {
         var skippedIDs = Set<TransactionID>()
 
         while rowsUsed < rowsBudgetRemaining {
+            if !shouldContinue() { return false }
+            if shouldYieldIncremental(unlimited: unlimited) { return false }
             if !unlimited,
                Date().timeIntervalSince(started) >= timeBudgetSeconds
             {
                 break
             }
-            if await workCoordinator.isAssistantPriorityActive { break }
+            if await workCoordinator.isAssistantPriorityActive { return false }
 
             let batch: [Transaction]
             do {
@@ -360,7 +425,7 @@ public actor TransactionEnrichmentCoordinator: TransactionEnrichmentRunning {
                 )
                 batch = fetched.filter { !skippedIDs.contains($0.id) }
             } catch {
-                return
+                return false
             }
             guard !batch.isEmpty else { break }
 
@@ -370,8 +435,10 @@ public actor TransactionEnrichmentCoordinator: TransactionEnrichmentRunning {
             assignments.reserveCapacity(batch.count)
 
             for transaction in batch {
+                if !shouldContinue() { return false }
+                if shouldYieldIncremental(unlimited: unlimited) { return false }
                 if rowsUsed >= rowsBudgetRemaining { break }
-                if await workCoordinator.isAssistantPriorityActive { break }
+                if await workCoordinator.isAssistantPriorityActive { return false }
 
                 if transaction.effectiveCategorySource == .user {
                     skippedIDs.insert(transaction.id)
@@ -435,6 +502,46 @@ public actor TransactionEnrichmentCoordinator: TransactionEnrichmentRunning {
                 break
             }
         }
+        return shouldContinue() && !shouldYieldIncremental(unlimited: unlimited)
+    }
+
+    private func shouldYieldIncremental(unlimited: Bool) -> Bool {
+        !unlimited && (preemptIncremental || fullDrainRunning)
+    }
+
+    private func waitForRunnerIfNeeded() async {
+        if isRunning && !fullDrainRunning {
+            preemptIncremental = true
+        }
+        while isRunning || fullDrainRunning {
+            await waitUntilRunnerIdle()
+        }
+    }
+
+    private func waitUntilRunnerIdle() async {
+        guard isRunning || fullDrainRunning else { return }
+        let id = UUID()
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                if Task.isCancelled {
+                    continuation.resume()
+                } else {
+                    idleWaiters[id] = continuation
+                }
+            }
+        } onCancel: {
+            Task { await self.cancelIdleWaiter(id) }
+        }
+    }
+
+    private func cancelIdleWaiter(_ id: UUID) {
+        idleWaiters.removeValue(forKey: id)?.resume()
+    }
+
+    private func notifyRunnerIdle() {
+        let waiters = idleWaiters
+        idleWaiters.removeAll()
+        waiters.values.forEach { $0.resume() }
     }
 }
 

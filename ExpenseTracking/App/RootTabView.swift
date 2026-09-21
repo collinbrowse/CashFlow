@@ -99,6 +99,7 @@ struct RootTabView: View {
                 accountsViewModel: accountsViewModel,
                 settingsViewModel: settingsViewModel,
                 appLockViewModel: appLockViewModel,
+                titleCleanupLiveActivity: container.titleCleanupLiveActivity,
                 scenePhase: scenePhase,
                 onStoreEpoch: handleStoreEpoch,
                 onScenePhase: handleScenePhase,
@@ -308,6 +309,7 @@ private struct RootLifecycleModifier: ViewModifier {
     @Bindable var accountsViewModel: AccountsViewModel
     let settingsViewModel: SettingsViewModel
     @Bindable var appLockViewModel: AppLockViewModel
+    let titleCleanupLiveActivity: TitleCleanupLiveActivityPresenter
     let scenePhase: ScenePhase
     let onStoreEpoch: () async -> Void
     let onScenePhase: (ScenePhase) async -> Void
@@ -348,6 +350,7 @@ private struct RootLifecycleModifier: ViewModifier {
             appLockViewModel.handleScenePhase(scenePhase)
             appLockViewModel.onAppear()
             settingsViewModel.startObservingEnrichmentProgress()
+            titleCleanupLiveActivity.startObserving()
             Task { await onScenePhase(scenePhase) }
         }
     }

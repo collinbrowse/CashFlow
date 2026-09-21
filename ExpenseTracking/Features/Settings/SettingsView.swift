@@ -101,7 +101,12 @@ struct SettingsView: View {
                 .accessibilityElement(children: .combine)
                 .accessibilityIdentifier("settings.titleCleanup.status")
 
-                if viewModel.canCleanUpTitles {
+                if viewModel.canStopTitleCleanup {
+                    Button("Stop", role: .destructive) {
+                        Task { await viewModel.stopTitleCleanup() }
+                    }
+                    .accessibilityIdentifier("settings.stopCleanup")
+                } else if viewModel.canCleanUpTitles {
                     Button(viewModel.titleCleanupActionTitle) {
                         Task { await viewModel.startTitleCleanup() }
                     }
